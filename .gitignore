@@ -1,0 +1,56 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# JavaScript dependencies and build output
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+coverage/
+
+# Runtime logs and local output
+*.log
+logs/
+
+# User data, artifacts, vaults, and database volumes
+data/artifacts/*
+!data/artifacts/.gitkeep
+data/qdrant/
+data/zhiliutai.db*
+data/vaults/*
+!data/vaults/.gitkeep
+vaults/
+
+# Local databases and generated exports
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.bak
+exports/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Test-only private fixtures
+backend/tests/fixtures/private/
+frontend/tests/fixtures/private/
