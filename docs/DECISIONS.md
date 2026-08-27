@@ -97,3 +97,27 @@
 - 决策：首版 watcher 运行在单个 FastAPI 进程中，轮询受管理 Markdown 并以显式 rescan 补偿漏事件；发布使用原子文件替换，索引成功后才切换 current version。
 - 原因：单用户本机应用不需要分布式 watcher。稳定 `zhiliu_id`、内容哈希、幂等 rescan 和失败不切换旧版本，比引入额外守护进程更易验证且更可靠。
 - 边界：当前不支持多个 API 进程同时监听同一 Vault；未来若需要多进程，必须先增加单实例协调和新的并发测试。
+
+## ADR-0013：阶段 4 采用 SQLite 权威复核的自建 Hybrid RAG
+
+- 状态：已采纳
+- 日期：2026-08-27
+- 决策：
+  1. QueryProcessor 生成参数安全的 FTS5 查询；FTS5 与 Qdrant Local 并行召回，
+     使用 RRF 去重融合。Qdrant payload 只做候选过滤和结构校验，published、软删除
+     和 current_content_version_id 始终回到 SQLite 权威复核。
+  2. EvidencePolicy 只评估最终 top-k；证据为空或置信度不足时直接拒答，不调用答案
+     Provider。答案输出采用结构化 claim，每个 claim 必须绑定本次合法 Citation。
+  3. CitationBuilder 只从 SQLite Chunk 和已验证的来源元数据生成 exact/fallback/
+     unavailable locator 与受控 target，不猜测页码、标题或 URL。
+  4. ModelRun 与 Citation 保存本次问答的 provider、Prompt、参数、Token、耗时、内容
+     哈希、版本和定位快照；这些记录不是用户可编辑正文主库。
+  5. Reranker 仅以可注入 Protocol 存在；当前没有明确上游 HTTP 契约，不实现生产 HTTP
+     adapter，只提供本地确定性参考实现和固定中文离线评测。
+  6. 阶段 4 提供普通 QuestionAnswerService 和 SSE API，不引入完整 LangGraph、
+     Agent 或 MCP。
+- 原因：先保证版本正确性、引用可追溯和证据不足时的安全行为，再为未来编排层保留
+  清晰 service 边界；避免把向量库或未知协议当成业务权威。
+- 后果：RAG 查询在单机 SQLite/Qdrant Local 上可重建；外部模型不可用时搜索仍可用，
+  问答会返回安全错误或拒答。生产 reranker、Graph、Agent 和 MCP 仍需后续阶段另立
+  实现与验收。

@@ -1,0 +1,22 @@
+[
+  {
+    "id": "sqlite-authority",
+    "query": "SQLite 权威校验",
+    "relevant_chunk_ids": ["eval-sqlite"]
+  },
+  {
+    "id": "citation-locator",
+    "query": "Citation 精确定位",
+    "relevant_chunk_ids": ["eval-citation"]
+  },
+  {
+    "id": "obsidian-source",
+    "query": "Obsidian Markdown 唯一主来源",
+    "relevant_chunk_ids": ["eval-obsidian"]
+  },
+  {
+    "id": "evidence-refusal",
+    "query": "证据不足时拒答",
+    "relevant_chunk_ids": ["eval-evidence"]
+  }
+]

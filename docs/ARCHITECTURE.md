@@ -6,14 +6,14 @@
 
 ~~~text
 React + TypeScript + Vite
-          │ REST / JSON（后续 SSE）
+          │ REST / JSON + SSE
           ▼
 FastAPI
  ├─ Sources / Items / Review / Jobs / Obsidian
  ├─ Python JobRunner
  ├─ Obsidian polling watcher + rescan
  ├─ OpenAI-compatible capability adapters
- ├─ 后续 IngestionGraph / QuestionAnswerGraph
+ ├─ RAG services（可供未来 Graph 编排）
  ├─ 后续 MCP Server + MCP Client
  │
  ├─ SQLite + FTS5
@@ -30,7 +30,7 @@ FastAPI
 | --- | --- | --- |
 | 用户确认后的知识正文 | Obsidian Markdown | 网页编辑与 watcher 都读写同一文件 |
 | 原始输入与处理产物 | `data/artifacts` | SHA-256 内容寻址，不由用户文件名决定内部路径 |
-| 业务元数据、版本、任务、Chunk、ModelRun | SQLite | `data/zhiliutai.db`，SQLAlchemy + Alembic |
+| 业务元数据、版本、任务、Chunk、ModelRun、Citation | SQLite | `data/zhiliutai.db`，SQLAlchemy + Alembic |
 | 全文索引 | SQLite FTS5 | `chunk_fts`，从 Chunk/Markdown 可重建 |
 | 向量索引 | Qdrant Local | `data/qdrant/`，不保存业务主状态 |
 
@@ -48,9 +48,10 @@ Chat 与 Embedding 是独立 capability。默认 Chat adapter 使用 OpenAI-comp
 - `NoteBinding`：`zhiliu_id`、Vault 相对路径、内容哈希与同步状态。
 - `Chunk`：SQLite 中的可追踪文本与引用定位；向量写入 Qdrant。
 - `ProcessingJob` / `JobAttempt`：持久状态、进度、心跳、重试、结构化错误和失败历史。
-- `ModelRun`：为模型调用可观测性建立的基线表。
+- `ModelRun`：记录 RAG provider、Prompt、参数、输入/输出快照、Token、耗时和安全错误码。
+- `Citation`：记录一次回答使用的 Chunk、内容哈希、ContentVersion、locator、target 和检索分数快照。
 
-`Tag`、`Collection`、`Citation` 会在对应后续业务阶段落地，不创建无实际用途的空表；这些核心概念仍由 `PROJECT.md` 保留。
+`Tag`、`Collection` 仍会在对应后续业务阶段落地；`Citation` 已在阶段 4 作为问答审计快照落地，不形成用户可编辑正文主库。
 
 ## 4. JobRunner
 
@@ -98,20 +99,41 @@ Job handler，不另建第二套业务流程。
   解析出的 block 文本及 locator 以可重建的 ContentVersion.source_metadata_json
   保存，不形成用户可编辑正文主库。
 - IndexService 从这些 segments 生成带 JSON locator 的 Chunk.source_locator；
-  Qdrant payload 继续复用相同 locator，因此后续 Citation 可以回到 PDF 页码、
-  DOCX 标题层级或网页 URL。网页原始 URL 请求和最终 HTML 快照都作为
+  Qdrant payload 继续复用相同 locator，因此 CitationBuilder 可以回到 PDF 页码、
+  DOCX 标题层级或网页 URL；CitationBuilder 再从 SQLite 元数据生成安全的 exact/fallback/unavailable
+  locator 和 target。网页原始 URL 请求和最终 HTML 快照都作为
   SourceArtifact 保留。
 
 合成 PDF/DOCX fixture 由 backend/tests/fixture_sources.py 在测试中确定性生成，
 不提交来源不明的二进制材料。
 
-## 7. Provider 与 Graph 边界
+## 7. 阶段 4 RAG 检索与问答
+
+HybridRetriever 先从 SQLite 快照取得 published、未软删除且具有
+current_content_version_id 的条目；全文通道查询 SQLite FTS5，向量通道只使用
+Qdrant Local 的 current-version payload filter。两路候选使用加权 RRF 去重，再回到
+SQLite 复核并重建 Chunk 内容、标题、版本和 locator。Qdrant payload 不是版本权威来源。
+
+EvidencePolicy 只对最终返回的 top-k Chunk 评估证据状态。没有证据或置信度不足时，
+QuestionAnswerService 直接返回拒答，不调用答案 Provider。答案 Provider 只接收带
+citation ID 的证据材料；结构化 claim 必须绑定本次 CitationBuilder 生成的合法 ID。
+知识版本在模型调用前后都会复核，变化时安全重试或返回冲突。
+
+POST /api/search 返回搜索结果和结构化 citation；POST /api/chat/stream 在完整问答结果
+准备好后发送 meta、delta、citations、done 事件。ModelRun/Citation 是审计快照，不是
+用户确认正文主库。阶段 4 不引入完整 LangGraph/QuestionAnswerGraph。
+
+RerankerProvider 只是可注入的普通 Protocol；未配置或失败时保留 RRF 并返回降级诊断。
+当前只提供本地确定性 keyword-overlap 参考实现和固定中文离线评测，不伪造生产 HTTP
+协议。
+
+## 8. Provider 与 Graph 边界
 
 Chat、Embedding、ASR、Vision、Reranker 是独立 capability。阶段 2 使用 Chat 与 Embedding；测试注入确定性 provider，不读取真实 secret。
 
 LangChain 只用于文档、切分、Embedding、Retriever、Prompt/Message、LLM 和 Tool 等合适抽象。最终两个主要 LangGraph 是 `IngestionGraph` 与 `QuestionAnswerGraph`；Graph 负责编排、路由、条件分支和需要的 checkpoint/HITL，业务逻辑留在普通 service。
 
-## 8. Health
+## 9. Health
 
 `GET /api/health` 检查：
 
@@ -126,7 +148,7 @@ LangChain 只用于文档、切分、Embedding、Retriever、Prompt/Message、LL
 
 状态统一为 `healthy/degraded/not_configured/configured/unavailable`。Vault 或模型未配置不会伪装正常；FFmpeg 缺失只影响后续视频能力，不拖垮 API。Request ID、404/422/500 统一错误形状和单次结构化异常日志继续保留。
 
-## 9. Docker、CI 与浏览器
+## 10. Docker、CI 与浏览器
 
 Dockerfile 构建 React 后由 FastAPI 托管静态产物，容器启动时执行 SQLite migration。Docker 是 delivery/CI concern，不是本地 prerequisite。`compose.yaml` 已移除。
 

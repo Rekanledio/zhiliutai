@@ -55,6 +55,14 @@ class Settings(BaseSettings):
     reranker_base_url: str | None = None
     reranker_model: str | None = None
 
+    rag_query_max_chars: int = 2_000
+    rag_rrf_k: int = 60
+    rag_fts_limit: int = 30
+    rag_vector_limit: int = 30
+    rag_vector_score_threshold: float = 0.35
+    rag_fts_confident_rank: int = 3
+    rag_rerank_limit: int = 20
+
     health_check_timeout: float = 0.35
     cors_origins: str = "http://127.0.0.1:5173,http://localhost:5173"
 

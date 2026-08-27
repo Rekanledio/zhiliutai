@@ -47,7 +47,14 @@ DOCX 标题层级/表格行、网页标题层级/最终 URL、网页快照 Artif
 审核/发布/Chunk locator，以及 URL 私网地址和重定向目的地复验。测试不访问
 真实网页，不读取 Cookie 或个人文件，也不提交二进制 fixture。
 
-前端覆盖 Dashboard、最终 Health 组件、七项导航、Inbox 提交、Job 状态、审核、发布、Obsidian watcher 状态、统一错误与后端 Request ID、请求超时、AbortController 取消和离线降级。
+阶段 4 使用临时 SQLite、Qdrant Local、临时 Artifact、确定性 RAG Provider 和
+合成 fixtures，覆盖 QueryProcessor、FTS5/Qdrant hybrid、RRF 去重、current
+version SQLite authority、软删除/未发布排除、EvidencePolicy、CitationBuilder
+的 PDF/DOCX/网页/Obsidian locator、安全 Artifact target、RagChatProvider、
+claim/citation 校验、ModelRun/Citation 审计、知识变化复核、SSE 事件、reranker
+失败降级和固定中文离线评测。网页相关测试只使用 httpx.MockTransport。
+
+前端覆盖 Dashboard、最终 Health 组件、七项导航、Inbox 提交、Job 状态、审核、发布、Obsidian watcher 状态、搜索结果、SSE 问答与 citation 卡片、统一错误与后端 Request ID、请求超时、AbortController 取消和离线降级。
 
 ## 环境能力门禁
 
@@ -55,6 +62,8 @@ DOCX 标题层级/表格行、网页标题层级/最终 URL、网页快照 Artif
 - 真实浏览器自动化：Playwright CI 或浏览器能力正常的环境。当前 automated component verification passed，人工浏览器闭环 passed；Playwright E2E pending。
 - FFmpeg：阶段 5 视频验收再验证；当前未安装且不自行安装。
 - 阶段 3 URL 获取：只测试公网 DNS 解析和 mock transport；不使用真实个人网页凭据。
+- 阶段 4 reranker：没有明确的上游 HTTP 协议，因此只测试可注入 Protocol 和本地
+  keyword-overlap 参考实现，不将其作为生产兼容适配器。
 
 ## 数据安全
 

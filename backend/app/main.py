@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import structlog
 
+from app.api.rag_routes import router as rag_router
 from app.api.routes import router
 from app.core.config import PROJECT_ROOT, Settings, get_settings
 from app.core.errors import (
@@ -34,6 +35,11 @@ from app.providers.models import (
     PassthroughDraftProvider,
     ProviderNotConfigured,
 )
+from app.providers.rag import OpenAICompatibleRagChatProvider, RagChatProvider
+from app.rag.citations import CitationBuilder
+from app.rag.question_answer import QuestionAnswerService
+from app.rag.reranking import RerankerProvider
+from app.rag.retrieval import HybridRetriever
 from app.services.jobs import JobRunner
 from app.services.stage2 import Stage2Service
 
@@ -64,6 +70,8 @@ def create_app(
     settings: Settings | None = None,
     draft_provider: DraftProvider | None = None,
     embedding_provider: EmbeddingProvider | None = None,
+    rag_chat_provider: RagChatProvider | None = None,
+    reranker: RerankerProvider | None = None,
     *,
     start_background: bool = True,
     serve_frontend: bool = True,
@@ -84,7 +92,26 @@ def create_app(
                 embedding_provider = OpenAICompatibleEmbeddingProvider(resolved_settings)
         except ProviderNotConfigured:
             embedding_provider = None
+    if rag_chat_provider is None:
+        try:
+            rag_chat_provider = OpenAICompatibleRagChatProvider(resolved_settings)
+        except ProviderNotConfigured:
+            rag_chat_provider = None
     stage2 = Stage2Service(resolved_settings, session_factory, draft_provider, embedding_provider)
+    rag_retriever = HybridRetriever(
+        session_factory,
+        stage2.vector_store,
+        embedding_provider,
+        resolved_settings,
+        reranker=reranker,
+    )
+    citation_builder = CitationBuilder(session_factory)
+    question_answer_service = QuestionAnswerService(
+        session_factory,
+        rag_retriever,
+        citation_builder,
+        rag_chat_provider,
+    )
     runner = JobRunner(
         session_factory,
         handlers={
@@ -141,6 +168,10 @@ def create_app(
     app.state.engine = engine
     app.state.session_factory = session_factory
     app.state.stage2_service = stage2
+    app.state.rag_retriever = rag_retriever
+    app.state.citation_builder = citation_builder
+    app.state.rag_chat_provider = rag_chat_provider
+    app.state.question_answer_service = question_answer_service
     app.state.job_runner = runner
     frontend_dist = PROJECT_ROOT / "frontend" / "dist"
     app.add_middleware(
@@ -180,6 +211,7 @@ def create_app(
         return await metadata()
 
     app.include_router(router)
+    app.include_router(rag_router)
     app.add_exception_handler(ApplicationError, application_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)

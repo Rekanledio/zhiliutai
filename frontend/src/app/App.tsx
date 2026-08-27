@@ -9,6 +9,7 @@ import {
 import { InboxPage } from "../features/inbox/InboxPage";
 import { JobsPage } from "../features/jobs/JobsPage";
 import { KnowledgePage } from "../features/knowledge/KnowledgePage";
+import { SearchPage } from "../features/search/SearchPage";
 import "../styles/global.css";
 
 type PageKey =
@@ -293,7 +294,7 @@ function PlaceholderPage({ item }: { item: NavItem }) {
       <p>导航和页面边界已经就绪。这个模块会在后续阶段按 PROJECT.md 的范围逐步接入。</p>
       <div className="placeholder-boundary">
         <span>当前阶段</span>
-        <strong>阶段 2 · Text / Markdown + Obsidian</strong>
+        <strong>阶段 4 · Hybrid Retrieval + RAG</strong>
       </div>
     </section>
   );
@@ -409,6 +410,8 @@ export default function App() {
           <KnowledgePage />
         ) : activePage === "jobs" ? (
           <JobsPage />
+        ) : activePage === "search" ? (
+          <SearchPage />
         ) : (
           <PlaceholderPage item={activeItem} />
         )}

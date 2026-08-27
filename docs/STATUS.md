@@ -8,7 +8,8 @@
 - 阶段 1：**通过**。
 - 阶段 2：**通过自动化与人工闭环验收**。
 - 阶段 3：**通过自动化闭环验收**。
-- 下一阶段：阶段 4（自建 RAG），尚未开始。
+- 阶段 4：**实现完成，自动化门禁通过**。
+- 下一阶段：阶段 5（视频/多模态），尚未开始。
 
 阶段 1 的验收定义已按 ADR-0011 收口：本地不再要求 Docker Desktop、PostgreSQL、pgvector、Redis 或当前 runner 的真实浏览器。Docker build 和 Playwright E2E 分别是 CI/具备能力环境的门禁，未执行即不标记 passed。
 
@@ -43,6 +44,21 @@
 - 阶段 3 仍复用现有 JobRunner、草稿/审核/发布、Vault 和当前版本索引收敛，
   未引入 RAG Chat、视频、Agent 或 MCP。
 
+## 阶段 4 已实现
+
+- QueryProcessor、SQLite FTS5 与 Qdrant Local 双通道检索；Qdrant 只提供候选，
+  所有结果回到 SQLite 复核 published、未软删除和 current_content_version_id。
+- 加权 RRF、去重、当前版本校验、证据门禁和可选 reranker 接口；reranker 未配置或
+  失败时保留 RRF 结果并明确标记降级。
+- POST /api/search 返回结构化结果、诊断、证据状态和安全 citation；支持 PDF 页码、
+  DOCX 标题/段落/表格行、网页最终 URL 与 Obsidian 回退定位，并提供受控 Artifact 读取。
+- 独立 RagChatProvider、QuestionAnswerService 和 POST /api/chat/stream；证据不足
+  时拒答且不调用答案 Provider，每个结构化 claim 必须绑定本次合法 citation。
+- ModelRun 审计输入/输出/Token/耗时，Citation 保存内容哈希、版本快照、locator、
+  target 与检索分数；新增 migration 0003_rag_audit。
+- SearchPage 展示搜索结果、SSE 回答、证据状态和引用卡片；固定中文离线评测集仅使用
+  合成 chunk ID，不宣称真实线上召回率。
+
 人工闭环已在专用测试 Vault 验证：Markdown 提交、真实 DeepSeek 草稿、审核、发布、Obsidian 打开、连续多次外部修改、watcher 重扫与 FastEmbed/Qdrant 重索引均成功。最终只读核验为 SQLite Chunk 1 个版本、FTS5 1 个版本、Qdrant 1 个当前版本点，三者与 `KnowledgeItem.current_content_version_id` 一致。
 
 ## 当前验证结果
@@ -51,12 +67,12 @@
 uv sync --project backend --locked                    passed
 uv lock --project backend --check                     passed
 uv run --directory backend ruff check app tests       passed
-uv run --directory backend pytest -q                  31 passed
+uv run --directory backend pytest -q                  52 passed
 uv run --directory backend pytest -q tests/test_source_pipeline.py  5 passed
 temporary SQLite alembic up/down/up                    passed
 npm --prefix frontend ci --ignore-scripts ...         passed
 npm --prefix frontend run typecheck                   passed
-npm --prefix frontend run test                        9 passed
+npm --prefix frontend run test                        10 passed
 npm --prefix frontend run build                       passed
 FastAPI 127.0.0.1 runtime + GET /api/health            passed
 Vite 127.0.0.1 runtime                                passed
@@ -68,13 +84,15 @@ manual Stage 2 dedicated-Vault workflow               passed
 ## Git 与数据边界
 
 - `.env`、SQLite、Qdrant、Artifact、Vault、`node_modules`、虚拟环境和构建缓存均被忽略。
-- 阶段 2 收尾 commit 为 `b4b1fd5`，已成功推送到 GitHub `origin/main`；阶段 3
-  修改当前仍在工作树中，按约定尚未 commit/push。
+- 本次阶段 4 修改保留在当前工作树中，按约定尚未 commit/push；未修改全局 Git 配置。
 
 ## 真实剩余项
 
 - environment limitation：本机没有 Docker，未本地执行 `docker build`；GitHub Actions 已提供对应 gate。
 - environment limitation：当前浏览器 runner 曾报 `trusted Node process exited unexpectedly; kernel reset`；automated component verification passed，real browser E2E pending Playwright/browser-capable environment。
 - future phase：FFmpeg 当前不可用，阶段 5 视频功能前再验证，不自行安装。
-- future phase：Hybrid RAG、RAG Eval、视频、LangGraph、Agent、MCP Server/Client 仍按 `PROJECT.md` 后续阶段实施。
+- future phase：视频、ASR、Vision、FFmpeg、完整 LangGraph、Agent、MCP Server/Client
+  仍按 PROJECT.md 后续阶段实施；阶段 4 只提供可编排的普通 RAG service。
+- known risk：当前没有接入生产 reranker HTTP adapter，也未在没有明确协议的情况下伪造；
+  只提供可注入 Protocol 和本地确定性参考实现。
 - blocking：无。

@@ -199,11 +199,38 @@ class ModelRun(Base):
     operation: Mapped[str] = mapped_column(String(50))
     prompt_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
     parameters_json: Mapped[str] = mapped_column(Text, default="{}")
+    input_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(20))
     error_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class Citation(Base):
+    __tablename__ = "citations"
+    __table_args__ = (
+        UniqueConstraint("model_run_id", "label", name="uq_citation_model_run_label"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    model_run_id: Mapped[str] = mapped_column(
+        ForeignKey("model_runs.id", ondelete="CASCADE"), index=True
+    )
+    chunk_id: Mapped[str | None] = mapped_column(
+        ForeignKey("chunks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    knowledge_item_id: Mapped[str] = mapped_column(String(36), index=True)
+    content_version_id: Mapped[str] = mapped_column(String(36), index=True)
+    label: Mapped[str] = mapped_column(String(20))
+    ordinal: Mapped[int] = mapped_column(Integer)
+    source_type: Mapped[str] = mapped_column(String(32))
+    excerpt: Mapped[str] = mapped_column(Text)
+    chunk_content_hash: Mapped[str] = mapped_column(String(64))
+    source_locator: Mapped[str] = mapped_column(Text)
+    retrieval_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
