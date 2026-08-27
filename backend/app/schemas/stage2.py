@@ -71,6 +71,7 @@ class RescanResponse(BaseModel):
     missing: int
     conflicts: int
     invalid: int
+    deferred: int = 0
 
 
 class ObsidianOpenResponse(BaseModel):

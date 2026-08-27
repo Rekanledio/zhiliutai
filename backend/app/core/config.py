@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -38,10 +39,12 @@ class Settings(BaseSettings):
     chat_base_url: str | None = None
     chat_model: str | None = None
     chat_api_key: str | None = None
+    embedding_provider: Literal["openai-compatible", "fastembed"] = "openai-compatible"
     embedding_base_url: str | None = None
     embedding_model: str | None = None
     embedding_api_key: str | None = None
     embedding_dimensions: int = 1536
+    embedding_cache_path: Path = PROJECT_ROOT / "data" / "models" / "fastembed"
     asr_base_url: str | None = None
     asr_model: str | None = None
     vision_base_url: str | None = None
@@ -59,7 +62,7 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    @field_validator("artifact_root", "qdrant_path", mode="before")
+    @field_validator("artifact_root", "qdrant_path", "embedding_cache_path", mode="before")
     @classmethod
     def resolve_data_path(cls, value: str | Path) -> Path:
         return resolve_project_path(value)

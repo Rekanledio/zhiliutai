@@ -1,8 +1,10 @@
+import sqlite3
 import time
 
 from fastapi.testclient import TestClient
 
 from app.obsidian.markdown import parse_note
+from app.services.vector_store import QdrantLocalStore
 from conftest import wait_for_job
 
 
@@ -85,9 +87,7 @@ def test_review_publish_frontmatter_chunk_qdrant_and_soft_delete(
     assert client.get(f"/api/items/{item_id}").status_code == 404
 
 
-def test_external_note_change_rescan_reindexes_latest(
-    client: TestClient, settings
-) -> None:
+def test_external_note_change_rescan_reindexes_latest(client: TestClient, settings) -> None:
     item_id, _ = submit_and_wait(client)
     assert client.post(f"/api/items/{item_id}/review", json={}).status_code == 200
     first = client.post(f"/api/items/{item_id}/publish").json()
@@ -113,10 +113,10 @@ def test_watcher_detects_file_modification(client: TestClient, settings) -> None
     published = client.post(f"/api/items/{item_id}/publish").json()
     original_version = published["version_no"]
     note_path = settings.managed_vault_root / published["note_relative_path"]
-    note_path.write_text(
-        note_path.read_text(encoding="utf-8").replace("监听前正文", "监听后正文"),
-        encoding="utf-8",
-    )
+    original = note_path.read_text(encoding="utf-8")
+    note_path.write_text(original.replace("监听前正文", "监听中正文"), encoding="utf-8")
+    time.sleep(0.06)
+    note_path.write_text(original.replace("监听前正文", "监听后正文"), encoding="utf-8")
     deadline = time.monotonic() + 4
     while time.monotonic() < deadline:
         latest = client.get(f"/api/items/{item_id}").json()
@@ -125,6 +125,64 @@ def test_watcher_detects_file_modification(client: TestClient, settings) -> None
         time.sleep(0.05)
     assert latest["version_no"] == original_version + 1
     assert "监听后正文" in latest["body"]
+    time.sleep(0.4)
+    stable = client.get(f"/api/items/{item_id}").json()
+    assert stable["version_no"] == original_version + 1
+
+    with sqlite3.connect(settings.database_path) as connection:
+        current_version_id = connection.execute(
+            "SELECT current_content_version_id FROM knowledge_items WHERE id = ?",
+            (item_id,),
+        ).fetchone()[0]
+        version_count = connection.execute(
+            "SELECT count(*) FROM content_versions WHERE knowledge_item_id = ?",
+            (item_id,),
+        ).fetchone()[0]
+        chunk_versions = connection.execute(
+            "SELECT count(*), count(DISTINCT content_version_id) "
+            "FROM chunks WHERE knowledge_item_id = ?",
+            (item_id,),
+        ).fetchone()
+        fts_versions = connection.execute(
+            "SELECT count(*), count(DISTINCT content_version_id) "
+            "FROM chunk_fts WHERE knowledge_item_id = ?",
+            (item_id,),
+        ).fetchone()
+        indexed_version_id = connection.execute(
+            "SELECT content_version_id FROM chunks WHERE knowledge_item_id = ?",
+            (item_id,),
+        ).fetchone()[0]
+
+    assert version_count == 3
+    assert chunk_versions == (1, 1)
+    assert fts_versions == (1, 1)
+    assert indexed_version_id == current_version_id
+    vector_results = QdrantLocalStore(settings.qdrant_path, 8).search([1.0] * 8, limit=100)
+    assert {result["payload"]["content_version_id"] for result in vector_results} == {
+        current_version_id
+    }
+
+
+def test_transient_invalid_markdown_is_not_reported_missing(client: TestClient, settings) -> None:
+    item_id, _ = submit_and_wait(client, "瞬态文件测试", "text")
+    client.post(f"/api/items/{item_id}/review", json={})
+    published = client.post(f"/api/items/{item_id}/publish").json()
+    note_path = settings.managed_vault_root / published["note_relative_path"]
+    original = note_path.read_text(encoding="utf-8")
+    note_path.write_text("---\nzhiliu_id:", encoding="utf-8")
+
+    rescanned = client.post("/api/obsidian/rescan")
+    assert rescanned.status_code == 200
+    assert rescanned.json()["invalid"] == 1
+    assert rescanned.json()["missing"] == 0
+    latest_response = client.get(f"/api/items/{item_id}")
+    assert latest_response.status_code == 200
+    latest = latest_response.json()
+    assert latest["sync_state"] == "error"
+    assert latest["body"].strip() == "瞬态文件测试"
+
+    note_path.write_text(original, encoding="utf-8")
+    assert client.post("/api/obsidian/rescan").status_code == 200
 
 
 def test_published_edit_requires_current_hash(client: TestClient) -> None:
@@ -146,3 +204,14 @@ def test_published_edit_requires_current_hash(client: TestClient) -> None:
     )
     assert updated.status_code == 200, updated.text
     assert "安全网页编辑" in updated.json()["body"]
+    with sqlite3.connect(client.app.state.settings.database_path) as connection:
+        current_version_id = connection.execute(
+            "SELECT current_content_version_id FROM knowledge_items WHERE id = ?",
+            (item_id,),
+        ).fetchone()[0]
+    vector_results = QdrantLocalStore(client.app.state.settings.qdrant_path, 8).search(
+        [1.0] * 8, limit=100
+    )
+    assert {result["payload"]["content_version_id"] for result in vector_results} == {
+        current_version_id
+    }

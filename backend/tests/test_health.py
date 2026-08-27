@@ -127,6 +127,26 @@ async def test_model_not_configured(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_fastembed_model_reports_configured_without_loading_model(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        database_url=sqlite_url_for(tmp_path / "db.sqlite"),
+        qdrant_path=tmp_path / "qdrant",
+        artifact_root=tmp_path / "artifacts",
+        embedding_provider="fastembed",
+        embedding_model="BAAI/bge-small-zh-v1.5",
+        embedding_dimensions=512,
+        embedding_cache_path=tmp_path / "models",
+    )
+    component = await health_service.probe_model_providers(settings)
+    assert component.state == "configured"
+    assert "FastEmbed" in component.detail
+    assert settings.embedding_cache_path.is_dir()
+
+
+@pytest.mark.asyncio
 async def test_unreachable_model_does_not_report_healthy(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -190,17 +210,13 @@ def test_http_validation_and_internal_errors_keep_request_id(
 
     monkeypatch.setattr(errors.structlog, "get_logger", lambda *_: CaptureLogger())
     with TestClient(test_app, raise_server_exceptions=False) as test_client:
-        missing = test_client.get(
-            "/api/does-not-exist", headers={"X-Request-ID": "request-404"}
-        )
+        missing = test_client.get("/api/does-not-exist", headers={"X-Request-ID": "request-404"})
         invalid = test_client.get(
             "/test-validation",
             params={"value": "x"},
             headers={"X-Request-ID": "request-422"},
         )
-        crashed = test_client.get(
-            "/test-crash", headers={"X-Request-ID": "request-500"}
-        )
+        crashed = test_client.get("/test-crash", headers={"X-Request-ID": "request-500"})
     for response, expected in [
         (missing, "request-404"),
         (invalid, "request-422"),

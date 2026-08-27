@@ -9,9 +9,7 @@ from app.core.config import PROJECT_ROOT, Settings, get_settings, sqlite_url_for
 from app.services.vector_store import COLLECTION_NAME, QdrantLocalStore, VectorRecord
 
 
-def test_migration_upgrade_downgrade_upgrade(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_migration_upgrade_downgrade_upgrade(tmp_path: Path, monkeypatch) -> None:
     database_path = tmp_path / "migration.db"
     settings = Settings(
         _env_file=None,
@@ -41,9 +39,7 @@ def test_migration_upgrade_downgrade_upgrade(
             "chunks",
             "chunk_fts",
         }.issubset(tables)
-        assert connection.execute(
-            "SELECT sql FROM sqlite_master WHERE name='chunk_fts'"
-        ).fetchone()
+        assert connection.execute("SELECT sql FROM sqlite_master WHERE name='chunk_fts'").fetchone()
     command.downgrade(config, "base")
     command.upgrade(config, "head")
 
@@ -66,8 +62,29 @@ def test_qdrant_local_persists_payload_and_retrieves(tmp_path: Path) -> None:
     reopened = QdrantLocalStore(path, 3)
     result = reopened.search([1.0, 0.0, 0.0], limit=1)
     assert result[0]["payload"] == record.payload()
+    current = VectorRecord(
+        point_id="58145d8e-726d-4c89-98ca-cfbb7aa2a2c3",
+        vector=[0.0, 1.0, 0.0],
+        chunk_id="chunk-2",
+        knowledge_item_id="item-1",
+        content_version_id="version-2",
+        source_type="markdown",
+        source_locator="Notes/test.md",
+        embedding_model="fake",
+        embedding_version="v1",
+    )
+    reopened.upsert([current])
+    reopened.delete_item_except_version("item-1", "version-2")
+    current_results = reopened.search([0.0, 1.0, 0.0], limit=10)
+    assert [point["payload"]["content_version_id"] for point in current_results] == ["version-2"]
     client = QdrantClient(path=str(path))
     try:
         assert client.count(COLLECTION_NAME).count == 1
+    finally:
+        client.close()
+    reopened.delete_item("item-1")
+    client = QdrantClient(path=str(path))
+    try:
+        assert client.count(COLLECTION_NAME).count == 0
     finally:
         client.close()

@@ -179,31 +179,46 @@ async def _probe_http_model(
 
 
 async def probe_model_providers(settings: Settings) -> HealthComponent:
+    local_capabilities: list[str] = []
+    local_failures: list[str] = []
+    if settings.embedding_provider == "fastembed" and settings.embedding_model:
+        cache = probe_writable_directory(
+            "embedding_cache",
+            "Embedding Cache",
+            settings.embedding_cache_path,
+            create=True,
+        )
+        local_capabilities.append(f"Embedding(FastEmbed:{settings.embedding_model})")
+        if cache.state != "healthy":
+            local_failures.append("Embedding")
+
     capabilities = [
         ("Chat", settings.chat_base_url, settings.chat_model, settings.chat_api_key),
-        (
-            "Embedding",
-            settings.embedding_base_url,
-            settings.embedding_model,
-            settings.embedding_api_key,
-        ),
         ("ASR", settings.asr_base_url, settings.asr_model, None),
         ("Vision", settings.vision_base_url, settings.vision_model, None),
         ("Reranker", settings.reranker_base_url, settings.reranker_model, None),
     ]
+    if settings.embedding_provider == "openai-compatible":
+        capabilities.insert(
+            1,
+            (
+                "Embedding",
+                settings.embedding_base_url,
+                settings.embedding_model,
+                settings.embedding_api_key,
+            ),
+        )
     configured = [
-        (name, url, model, key)
-        for name, url, model, key in capabilities
-        if url and model
+        (name, url, model, key) for name, url, model, key in capabilities if url and model
     ]
-    if not configured:
+    if not configured and not local_capabilities:
         return _component(
             "model_providers",
             "Model Providers",
             "not_configured",
             "Chat、Embedding、ASR、Vision、Reranker 均未配置",
         )
-    failures: list[str] = []
+    failures: list[str] = list(local_failures)
     latencies: list[float] = []
     for name, url, model, key in configured:
         assert url is not None and model is not None
@@ -212,7 +227,7 @@ async def probe_model_providers(settings: Settings) -> HealthComponent:
             failures.append(name)
         if latency is not None:
             latencies.append(latency)
-    names = "、".join(name for name, *_ in configured)
+    names = "、".join([*(name for name, *_ in configured), *local_capabilities])
     if failures:
         return _component(
             "model_providers",
@@ -225,7 +240,7 @@ async def probe_model_providers(settings: Settings) -> HealthComponent:
         "model_providers",
         "Model Providers",
         "configured",
-        f"已配置且端点可达：{names}",
+        f"已配置：{names}；远程端点已探测，本地模型在首次调用时加载",
         max(latencies, default=None),
     )
 

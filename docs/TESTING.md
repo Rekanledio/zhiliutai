@@ -37,14 +37,16 @@ npm --prefix frontend run dev
 
 后端覆盖 SQLite 健康/失败、WAL、Qdrant Local 健康与持久检索、Artifact 读写、Vault 未配置、Vault 配置但 watcher 未运行、模型未配置/不可达、配置路径解析、404/422/500 Request ID、真实 migration 升降级、JobRunner 失败/重试/重启恢复。
 
-阶段 2 使用临时 Vault 和确定性 provider，覆盖 Text/Markdown 采集、规范化哈希、去重与幂等冲突、草稿/审核/发布、稳定 Frontmatter、Vault 原子写、Chunk、FTS5/Qdrant、外部修改 rescan、watcher 增量重索引、网页编辑冲突和软删除不删除 Markdown。
+阶段 2 使用临时 Vault 和确定性 provider，覆盖 Text/Markdown 采集、规范化哈希、去重与幂等冲突、草稿/审核/发布、稳定 Frontmatter、Vault 原子写、Chunk、FTS5/Qdrant、外部修改 rescan、watcher 增量重索引、连续快速保存防抖、瞬态无效 Markdown 回退、当前版本索引收敛、网页编辑冲突和软删除不删除 Markdown。
+
+阶段 2 人工闭环使用专用测试 Vault，验证真实 Chat provider、FastEmbed、审核发布、Obsidian 打开与连续多次外部修改。人工浏览器验收与 Playwright 自动化是两个不同结论：前者已完成，后者仍等待 CI/browser-capable environment。
 
 前端覆盖 Dashboard、最终 Health 组件、七项导航、Inbox 提交、Job 状态、审核、发布、Obsidian watcher 状态、统一错误与后端 Request ID、请求超时、AbortController 取消和离线降级。
 
 ## 环境能力门禁
 
 - Docker build：GitHub Actions 或具备 Docker 的环境；不要求本机安装 Docker。
-- 真实浏览器：Playwright CI 或浏览器能力正常的环境。当前仅能确认 automated component verification passed；real browser E2E pending。
+- 真实浏览器自动化：Playwright CI 或浏览器能力正常的环境。当前 automated component verification passed，人工浏览器闭环 passed；Playwright E2E pending。
 - FFmpeg：阶段 5 视频验收再验证；当前未安装且不自行安装。
 
 ## 数据安全

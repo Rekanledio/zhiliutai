@@ -1,6 +1,8 @@
+import asyncio
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 
@@ -44,8 +46,7 @@ class OpenAICompatibleDraftProvider:
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         prompt = (
             "请整理以下个人知识输入。保留事实，不扩写未知信息。"
-            "返回 JSON：title, body, summary, suggested_tags（字符串数组）。\n\n"
-            + content
+            "返回 JSON：title, body, summary, suggested_tags（字符串数组）。\n\n" + content
         )
         async with httpx.AsyncClient(timeout=60, follow_redirects=False) as client:
             response = await client.post(
@@ -81,6 +82,58 @@ class PassthroughDraftProvider:
             suggested_tags=[],
             prompt_version="passthrough-v1",
         )
+
+
+class FastEmbedEmbeddingProvider:
+    version = "fastembed-v1"
+
+    def __init__(
+        self,
+        settings: Settings,
+        model_factory: Callable[..., Any] | None = None,
+    ) -> None:
+        if settings.embedding_provider != "fastembed" or not settings.embedding_model:
+            raise ProviderNotConfigured("FastEmbed capability is not configured")
+        if model_factory is None:
+            from fastembed import TextEmbedding
+
+            model_factory = TextEmbedding
+        self.model = settings.embedding_model
+        self.dimensions = settings.embedding_dimensions
+        self.cache_path = settings.embedding_cache_path
+        self._model_factory = model_factory
+        self._loaded_model: Any | None = None
+        self._load_lock = asyncio.Lock()
+
+    async def _get_model(self) -> Any:
+        if self._loaded_model is not None:
+            return self._loaded_model
+        async with self._load_lock:
+            if self._loaded_model is None:
+                self.cache_path.mkdir(parents=True, exist_ok=True)
+                self._loaded_model = await asyncio.to_thread(
+                    self._model_factory,
+                    model_name=self.model,
+                    cache_dir=str(self.cache_path),
+                )
+        return self._loaded_model
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        model = await self._get_model()
+
+        def generate() -> list[list[float]]:
+            vectors: list[list[float]] = []
+            for vector in model.embed(texts):
+                values = vector.tolist() if hasattr(vector, "tolist") else list(vector)
+                vectors.append([float(value) for value in values])
+            return vectors
+
+        vectors = await asyncio.to_thread(generate)
+        if len(vectors) != len(texts):
+            raise ValueError("Embedding 返回数量与输入不一致")
+        if any(len(vector) != self.dimensions for vector in vectors):
+            raise ValueError("Embedding 维度与配置不一致")
+        return vectors
 
 
 class OpenAICompatibleEmbeddingProvider:

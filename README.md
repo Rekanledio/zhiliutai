@@ -21,7 +21,7 @@ npm --prefix frontend run dev
 
 本地开发不需要 Docker、PostgreSQL、Redis 或独立 Qdrant Server。默认数据库为 `data/zhiliutai.db`，向量目录为 `data/qdrant/`，Artifact 目录为 `data/artifacts/`；均可用环境变量覆盖且被 Git 忽略。
 
-`VAULT_PATH` 未配置时 API 和首页仍可运行，但发布/监听功能会明确显示未配置。Chat 与 Embedding 是独立 capability：Chat 未配置时保留规范化原文草稿；Embedding 未配置时不允许伪装完成向量发布。
+`VAULT_PATH` 未配置时 API 和首页仍可运行，但发布/监听功能会明确显示未配置。Chat 与 Embedding 是独立 capability：Chat 默认使用 OpenAI-compatible API；Embedding 默认使用进程内 FastEmbed 与中文 `BAAI/bge-small-zh-v1.5`（512 维），模型缓存在被 Git 忽略的 `data/models/`。也可以切换到 OpenAI-compatible Embedding。Embedding 未配置时不允许伪装完成向量发布。
 
 ## 验证
 

@@ -62,10 +62,10 @@ class IndexService:
                 )
             )
         self.vector_store.upsert(records)
-        await session.execute(delete(Chunk).where(Chunk.content_version_id == version.id))
+        await session.execute(delete(Chunk).where(Chunk.knowledge_item_id == item.id))
         await session.execute(
-            text("DELETE FROM chunk_fts WHERE content_version_id = :version_id"),
-            {"version_id": version.id},
+            text("DELETE FROM chunk_fts WHERE knowledge_item_id = :item_id"),
+            {"item_id": item.id},
         )
         session.add_all(chunks)
         await session.flush()

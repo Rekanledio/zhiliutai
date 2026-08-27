@@ -32,6 +32,7 @@ logs/
 data/artifacts/*
 !data/artifacts/.gitkeep
 data/qdrant/
+data/models/
 data/zhiliutai.db*
 data/vaults/*
 !data/vaults/.gitkeep

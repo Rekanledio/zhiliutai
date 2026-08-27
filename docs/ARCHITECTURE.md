@@ -36,6 +36,8 @@ FastAPI
 
 SQLite 默认启用 foreign keys、WAL 和 busy timeout。测试使用临时 SQLite 并执行真实 Alembic migration。Qdrant payload 包含 `chunk_id`、`knowledge_item_id`、`content_version_id`、`source_type`、`source_locator`、`embedding_model` 和 `embedding_version`。
 
+Chat 与 Embedding 是独立 capability。默认 Chat adapter 使用 OpenAI-compatible API；默认 Embedding adapter 使用进程内 FastEmbed 的中文 `BAAI/bge-small-zh-v1.5`（512 维），模型缓存位于 `data/models/fastembed/`。远程 OpenAI-compatible Embedding 仍是受支持的显式配置选项。
+
 ## 3. 当前领域模型
 
 阶段 2 已建立并实际使用：
@@ -69,13 +71,15 @@ Text / Markdown
 → chunk + FTS5 + Embedding + Qdrant
 → published
 → watcher/rescan detects external edit or rename
-→ new ContentVersion + new index
+→ new ContentVersion + current-only derived index
 → switch current version only after index succeeds
 ~~~
 
 写 Vault 后若数据库阶段失败，受管理 Markdown 仍带稳定 `zhiliu_id`，rescan 可恢复绑定与派生状态。索引失败不会切换当前版本。删除知识条目只软删除业务记录和派生向量，不删除 Vault 文件。
 
-当前 watcher 在单 API 进程内轮询受管理 Markdown，并提供显式 rescan。它忽略临时文件和无 `zhiliu_id` 的外部 Markdown；重复 ID 标记 conflict，文件缺失标记 missing，重命名只更新绑定路径。未来若改为多进程，必须先引入单实例协调，不能直接复制 watcher。
+当前 watcher 在单 API 进程内轮询受管理 Markdown，并提供显式 rescan。它通过最小文件年龄、读前/读后 stat 和共享 mutation lock 避免处理仍在写入的文件；瞬态不完整 Markdown 标记 error 并继续提供最近一次有效版本，不误判 missing。它忽略临时文件和无 `zhiliu_id` 的外部 Markdown；重复 ID 标记 conflict，文件缺失标记 missing，重命名只更新绑定路径。
+
+`ContentVersion` 保留每次稳定修改的历史；Chunk、FTS5 与 Qdrant 是可重建的当前检索投影。每次发布、网页修改、watcher 重索引和进程首次 rescan 都会按 `knowledge_item_id` 收敛 Qdrant，并确保 SQLite Chunk/FTS5 与 `current_content_version_id` 对齐。未来若改为多进程，必须先引入跨进程协调，不能直接复制 watcher。
 
 ## 6. Provider 与 Graph 边界
 

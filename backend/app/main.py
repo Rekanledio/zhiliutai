@@ -28,6 +28,7 @@ from app.obsidian.state import watcher_state
 from app.providers.models import (
     DraftProvider,
     EmbeddingProvider,
+    FastEmbedEmbeddingProvider,
     OpenAICompatibleDraftProvider,
     OpenAICompatibleEmbeddingProvider,
     PassthroughDraftProvider,
@@ -49,7 +50,7 @@ async def watcher_loop(stage2: Stage2Service, interval: float) -> None:
     try:
         while True:
             try:
-                await stage2.rescan()
+                await stage2.rescan(minimum_file_age_seconds=max(interval * 2, 0.25))
                 watcher_state.last_heartbeat_at = datetime.now(timezone.utc)
                 watcher_state.last_error = None
             except Exception as error:
@@ -77,12 +78,13 @@ def create_app(
             draft_provider = PassthroughDraftProvider()
     if embedding_provider is None:
         try:
-            embedding_provider = OpenAICompatibleEmbeddingProvider(resolved_settings)
+            if resolved_settings.embedding_provider == "fastembed":
+                embedding_provider = FastEmbedEmbeddingProvider(resolved_settings)
+            else:
+                embedding_provider = OpenAICompatibleEmbeddingProvider(resolved_settings)
         except ProviderNotConfigured:
             embedding_provider = None
-    stage2 = Stage2Service(
-        resolved_settings, session_factory, draft_provider, embedding_provider
-    )
+    stage2 = Stage2Service(resolved_settings, session_factory, draft_provider, embedding_provider)
     runner = JobRunner(
         session_factory,
         handlers={"ingest_text": stage2.process_ingestion},
@@ -141,9 +143,7 @@ def create_app(
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
-            origin.strip()
-            for origin in resolved_settings.cors_origins.split(",")
-            if origin.strip()
+            origin.strip() for origin in resolved_settings.cors_origins.split(",") if origin.strip()
         ],
         allow_credentials=False,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],

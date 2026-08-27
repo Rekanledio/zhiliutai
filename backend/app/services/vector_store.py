@@ -76,22 +76,55 @@ class QdrantLocalStore:
             client.close()
 
     def delete_version(self, content_version_id: str) -> None:
+        self._delete_filter(
+            models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="content_version_id",
+                        match=models.MatchValue(value=content_version_id),
+                    )
+                ]
+            )
+        )
+
+    def delete_item(self, knowledge_item_id: str) -> None:
+        self._delete_filter(
+            models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="knowledge_item_id",
+                        match=models.MatchValue(value=knowledge_item_id),
+                    )
+                ]
+            )
+        )
+
+    def delete_item_except_version(self, knowledge_item_id: str, current_version_id: str) -> None:
+        self._delete_filter(
+            models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="knowledge_item_id",
+                        match=models.MatchValue(value=knowledge_item_id),
+                    )
+                ],
+                must_not=[
+                    models.FieldCondition(
+                        key="content_version_id",
+                        match=models.MatchValue(value=current_version_id),
+                    )
+                ],
+            )
+        )
+
+    def _delete_filter(self, point_filter: models.Filter) -> None:
         self.ensure_collection()
         client = self._client()
         try:
             client.delete(
                 collection_name=COLLECTION_NAME,
                 wait=True,
-                points_selector=models.FilterSelector(
-                    filter=models.Filter(
-                        must=[
-                            models.FieldCondition(
-                                key="content_version_id",
-                                match=models.MatchValue(value=content_version_id),
-                            )
-                        ]
-                    )
-                ),
+                points_selector=models.FilterSelector(filter=point_filter),
             )
         finally:
             client.close()
