@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     managed_vault_dir: str = "知流台"
     artifact_root: Path = PROJECT_ROOT / "data" / "artifacts"
     obsidian_watch_interval_seconds: float = 1.0
+    source_max_bytes: int = 10_000_000
+    source_fetch_timeout: float = 10.0
+    source_max_redirects: int = 3
 
     chat_base_url: str | None = None
     chat_model: str | None = None

@@ -2,6 +2,8 @@ import asyncio
 import json
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlsplit
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -15,9 +17,12 @@ from app.db.models import (
     ProcessingJob,
     SourceArtifact,
 )
+from app.ingestion.fetcher import SourceFetcher, UnsafeUrlError
+from app.ingestion.parsers import parse_source
+from app.ingestion.types import ParsedSource, SourceBlock
 from app.obsidian.markdown import ObsidianVault, parse_note, render_note
 from app.providers.models import DraftProvider, EmbeddingProvider
-from app.services.artifacts import ArtifactStore
+from app.services.artifacts import ArtifactStore, StoredArtifact
 from app.services.content import content_hash, default_title, normalize_content
 from app.services.indexing import IndexService
 from app.services.vector_store import QdrantLocalStore
@@ -39,11 +44,183 @@ class Stage2Service:
         self._initial_vector_reconciliation_complete = False
         self.embedding_provider = embedding_provider
         self.vector_store = QdrantLocalStore(settings.qdrant_path, settings.embedding_dimensions)
+        self.source_fetcher = SourceFetcher(
+            max_bytes=settings.source_max_bytes,
+            timeout=settings.source_fetch_timeout,
+            max_redirects=settings.source_max_redirects,
+        )
 
     def vault(self) -> ObsidianVault:
         if self.settings.vault_root is None:
             raise ApplicationError(409, "vault_not_configured", "尚未配置 Obsidian Vault")
         return ObsidianVault(self.settings.vault_root, self.settings.managed_vault_dir)
+
+    async def submit_file(
+        self,
+        content: bytes,
+        filename: str | None,
+        media_type: str | None,
+        title: str | None,
+        idempotency_key: str | None,
+    ) -> tuple[KnowledgeItem, ProcessingJob, bool]:
+        if len(content) > self.settings.source_max_bytes:
+            raise ApplicationError(413, "source_too_large", "来源文件超过大小限制")
+        suffix = Path(filename or "").suffix.lower()
+        source_by_suffix = {
+            ".pdf": ("pdf", "application/pdf"),
+            ".docx": (
+                "docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+        }
+        source_type, default_media_type = source_by_suffix.get(suffix, (None, None))
+        if source_type is None:
+            raise ApplicationError(422, "unsupported_file_type", "仅支持 PDF 和 DOCX 文件")
+        stored = self.artifacts.put_bytes(content, suffix)
+        source_locator = json.dumps(
+            {
+                "kind": "file_upload",
+                "filename": Path(filename or f"source{suffix}").name,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return await self._submit_artifact(
+            stored,
+            source_type=source_type,
+            media_type=media_type or default_media_type,
+            title=title,
+            fallback_title=Path(filename or "").stem or f"{source_type} 来源",
+            idempotency_key=idempotency_key,
+            source_locator=source_locator,
+        )
+
+    async def submit_url(
+        self,
+        url: str,
+        title: str | None,
+        idempotency_key: str | None,
+    ) -> tuple[KnowledgeItem, ProcessingJob, bool]:
+        try:
+            self.source_fetcher.validate(url)
+        except UnsafeUrlError as error:
+            raise ApplicationError(422, "unsafe_url", str(error)) from error
+        stored = self.artifacts.put_text(url, ".url")
+        source_locator = json.dumps(
+            {"kind": "url_request", "url": url},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return await self._submit_artifact(
+            stored,
+            source_type="webpage",
+            media_type="text/uri-list",
+            title=title,
+            fallback_title=urlsplit(url).hostname or "网页来源",
+            idempotency_key=idempotency_key,
+            source_locator=source_locator,
+            payload_extra={"url": url},
+        )
+
+    async def _submit_artifact(
+        self,
+        stored: StoredArtifact,
+        *,
+        source_type: str,
+        media_type: str,
+        title: str | None,
+        fallback_title: str,
+        idempotency_key: str | None,
+        source_locator: str,
+        payload_extra: dict[str, object] | None = None,
+    ) -> tuple[KnowledgeItem, ProcessingJob, bool]:
+        async with self.session_factory() as session, session.begin():
+            if idempotency_key:
+                existing_job_result = await session.execute(
+                    select(ProcessingJob).where(ProcessingJob.idempotency_key == idempotency_key)
+                )
+                existing_job = existing_job_result.scalar_one_or_none()
+                if existing_job is not None:
+                    existing_payload = json.loads(existing_job.payload_json)
+                    existing_item = await session.get(
+                        KnowledgeItem, existing_payload.get("item_id")
+                    )
+                    if existing_item is None or existing_item.content_hash != stored.content_hash:
+                        raise ApplicationError(
+                            409,
+                            "idempotency_conflict",
+                            "同一幂等键已用于不同内容",
+                        )
+                    return existing_item, existing_job, True
+            duplicate_result = await session.execute(
+                select(KnowledgeItem)
+                .where(
+                    KnowledgeItem.content_hash == stored.content_hash,
+                    KnowledgeItem.deleted_at.is_(None),
+                )
+                .order_by(KnowledgeItem.created_at)
+                .limit(1)
+            )
+            duplicate = duplicate_result.scalar_one_or_none()
+            if duplicate is not None:
+                job_result = await session.execute(
+                    select(ProcessingJob)
+                    .where(ProcessingJob.payload_json.like(f'%"item_id": "{duplicate.id}"%'))
+                    .order_by(ProcessingJob.created_at.desc())
+                    .limit(1)
+                )
+                existing_job = job_result.scalar_one_or_none()
+                if existing_job is None:
+                    existing_job = ProcessingJob(
+                        kind="ingest_source",
+                        state="succeeded",
+                        stage="deduplicated",
+                        progress=1.0,
+                        payload_json=json.dumps(
+                            {"item_id": duplicate.id}, ensure_ascii=False
+                        ),
+                        result_json=json.dumps(
+                            {"item_id": duplicate.id}, ensure_ascii=False
+                        ),
+                    )
+                    session.add(existing_job)
+                return duplicate, existing_job, True
+
+            item = KnowledgeItem(
+                title=(title or fallback_title)[:300],
+                source_type=source_type,
+                status="processing",
+                content_hash=stored.content_hash,
+            )
+            session.add(item)
+            await session.flush()
+            artifact = SourceArtifact(
+                knowledge_item_id=item.id,
+                artifact_type="original_input",
+                media_type=media_type,
+                relative_path=stored.relative_path,
+                content_hash=stored.content_hash,
+                byte_size=stored.byte_size,
+                source_locator=source_locator,
+            )
+            session.add(artifact)
+            await session.flush()
+            payload: dict[str, object] = {
+                "item_id": item.id,
+                "artifact_id": artifact.id,
+                "source_type": source_type,
+                "title_provided": title is not None,
+            }
+            if payload_extra:
+                payload.update(payload_extra)
+            job = ProcessingJob(
+                kind="ingest_source",
+                payload_json=json.dumps(payload, ensure_ascii=False),
+                idempotency_key=idempotency_key,
+            )
+            session.add(job)
+            await session.flush()
+            return item, job, False
 
     async def submit_text(
         self,
@@ -125,7 +302,13 @@ class Stage2Service:
             job = ProcessingJob(
                 kind="ingest_text",
                 payload_json=json.dumps(
-                    {"item_id": item.id, "artifact_id": artifact.id}, ensure_ascii=False
+                    {
+                        "item_id": item.id,
+                        "artifact_id": artifact.id,
+                        "source_type": source_type,
+                        "title_provided": title is not None,
+                    },
+                    ensure_ascii=False,
                 ),
                 idempotency_key=idempotency_key,
             )
@@ -135,13 +318,84 @@ class Stage2Service:
 
     async def process_ingestion(self, job: ProcessingJob) -> dict[str, object]:
         payload = json.loads(job.payload_json)
-        async with self.session_factory() as session, session.begin():
+        async with self.session_factory() as session:
             item = await session.get(KnowledgeItem, payload["item_id"])
             artifact = await session.get(SourceArtifact, payload["artifact_id"])
-            if item is None or artifact is None:
-                raise RuntimeError("采集记录不完整")
+        if item is None or artifact is None:
+            raise RuntimeError("采集记录不完整")
+
+        source_type = str(payload.get("source_type") or item.source_type)
+        snapshot: SourceArtifact | None = None
+        if source_type == "webpage":
+            url = payload.get("url")
+            if not isinstance(url, str) or not url:
+                raise RuntimeError("网页来源缺少 URL")
+            try:
+                fetched = await self.source_fetcher.fetch(url)
+            except UnsafeUrlError as error:
+                raise ApplicationError(422, "unsafe_url", str(error)) from error
+            stored_snapshot = self.artifacts.put_bytes(fetched.content, ".html")
+            async with self.session_factory() as session, session.begin():
+                item = await session.get(KnowledgeItem, item.id)
+                if item is None:
+                    raise RuntimeError("知识条目不存在")
+                snapshot = SourceArtifact(
+                    knowledge_item_id=item.id,
+                    artifact_type="web_snapshot",
+                    media_type=fetched.media_type,
+                    relative_path=stored_snapshot.relative_path,
+                    content_hash=stored_snapshot.content_hash,
+                    byte_size=stored_snapshot.byte_size,
+                    source_locator=json.dumps(
+                        {
+                            "kind": "web_snapshot",
+                            "requested_url": fetched.requested_url,
+                            "url": fetched.final_url,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                )
+                session.add(snapshot)
+                await session.flush()
+            parsed = parse_source(
+                source_type,
+                fetched.content,
+                url=fetched.final_url,
+            )
+        elif source_type in {"text", "markdown"}:
             content = self.artifacts.read_text(artifact.relative_path)
-            draft = await self.draft_provider.create_draft(item.title, content)
+            body = normalize_content(content)
+            block = SourceBlock(
+                body.rstrip("\n"),
+                {"kind": source_type, "source_locator": artifact.source_locator or "inbox"},
+            )
+            parsed = ParsedSource(
+                source_type=source_type,
+                media_type=artifact.media_type,
+                title=default_title(body),
+                body=body,
+                blocks=(block,),
+                metadata={
+                    "source_type": source_type,
+                    "media_type": artifact.media_type,
+                    "title": default_title(body),
+                    "segments": [{"text": block.text, "locator": block.locator}],
+                },
+            )
+        else:
+            parsed = parse_source(
+                source_type,
+                self.artifacts.read_bytes(artifact.relative_path),
+            )
+
+        title_provided = bool(payload.get("title_provided"))
+        draft_title = item.title if title_provided else parsed.title
+        draft = await self.draft_provider.create_draft(draft_title, parsed.body)
+        async with self.session_factory() as session, session.begin():
+            item = await session.get(KnowledgeItem, item.id)
+            if item is None:
+                raise RuntimeError("知识条目不存在")
             next_no = await self._next_version_no(session, item.id)
             version = ContentVersion(
                 knowledge_item_id=item.id,
@@ -153,14 +407,23 @@ class Stage2Service:
                 summary=draft.summary,
                 suggested_tags_json=json.dumps(draft.suggested_tags, ensure_ascii=False),
                 prompt_version=draft.prompt_version,
+                source_metadata_json=json.dumps(parsed.metadata, ensure_ascii=False),
             )
             session.add(version)
             await session.flush()
-            item.title = version.title
+            if not title_provided:
+                item.title = version.title
             item.status = "pending_review"
             item.current_content_version_id = version.id
             item.updated_at = datetime.now(timezone.utc)
-            return {"item_id": item.id, "content_version_id": version.id}
+            result: dict[str, object] = {
+                "item_id": item.id,
+                "content_version_id": version.id,
+                "source_type": source_type,
+            }
+            if snapshot is not None:
+                result["snapshot_artifact_id"] = snapshot.id
+            return result
 
     async def _next_version_no(self, session: AsyncSession, item_id: str) -> int:
         result = await session.execute(
@@ -222,6 +485,7 @@ class Stage2Service:
                 summary=current.summary,
                 suggested_tags_json=current.suggested_tags_json,
                 prompt_version=current.prompt_version,
+                source_metadata_json=current.source_metadata_json,
             )
             session.add(version)
             await session.flush()
@@ -247,6 +511,7 @@ class Stage2Service:
         if binding is None:
             raise ApplicationError(409, "note_binding_missing", "发布条目缺少笔记绑定")
         vault = self.vault()
+        current = await self._version(session, item)
         disk_note = vault.read(binding.relative_path)
         disk_hash = content_hash(disk_note.body)
         if not expected_content_hash or expected_content_hash != disk_hash:
@@ -267,10 +532,23 @@ class Stage2Service:
             created_at=item.created_at,
             updated_at=datetime.now(timezone.utc),
             tags=[str(tag) for tag in disk_note.metadata.get("tags", []) if isinstance(tag, str)],
+            source_url=self._source_url(current.source_metadata_json),
         )
         vault.atomic_write(binding.relative_path, raw)
+        source_metadata_json = self._vault_source_metadata(
+            item,
+            next_body,
+            binding.relative_path,
+            source_url=self._source_url(current.source_metadata_json),
+        )
         await self._apply_vault_version(
-            session, item, binding, next_title, next_body, binding.relative_path
+            session,
+            item,
+            binding,
+            next_title,
+            next_body,
+            binding.relative_path,
+            source_metadata_json=source_metadata_json,
         )
         return item
 
@@ -316,6 +594,7 @@ class Stage2Service:
                 created_at=item.created_at,
                 updated_at=datetime.now(timezone.utc),
                 tags=json.loads(current.suggested_tags_json),
+                source_url=self._source_url(current.source_metadata_json),
             )
             vault.atomic_write(relative_path, raw)
             written = vault.read(relative_path)
@@ -334,9 +613,47 @@ class Stage2Service:
                 session.add(binding)
                 await session.flush()
             await self._apply_vault_version(
-                session, item, binding, current.title, written.body, relative_path
+                session,
+                item,
+                binding,
+                current.title,
+                written.body,
+                relative_path,
+                source_metadata_json=current.source_metadata_json,
             )
         return item
+
+    @staticmethod
+    def _source_url(source_metadata_json: str) -> str | None:
+        try:
+            metadata = json.loads(source_metadata_json or "{}")
+        except json.JSONDecodeError:
+            return None
+        value = metadata.get("url") if isinstance(metadata, dict) else None
+        return value if isinstance(value, str) else None
+
+    @staticmethod
+    def _vault_source_metadata(
+        item: KnowledgeItem,
+        body: str,
+        relative_path: str,
+        *,
+        source_url: str | None = None,
+    ) -> str:
+        normalized_body = normalize_content(body).rstrip("\n")
+        metadata: dict[str, object] = {
+            "source_type": item.source_type,
+            "media_type": "text/markdown",
+            "segments": [
+                {
+                    "text": normalized_body,
+                    "locator": {"kind": "obsidian", "path": relative_path},
+                }
+            ],
+        }
+        if source_url:
+            metadata["url"] = source_url
+        return json.dumps(metadata, ensure_ascii=False)
 
     async def _apply_vault_version(
         self,
@@ -346,6 +663,7 @@ class Stage2Service:
         title: str,
         body: str,
         relative_path: str,
+        source_metadata_json: str | None = None,
     ) -> ContentVersion:
         if self.embedding_provider is None:
             raise ApplicationError(409, "embedding_not_configured", "Embedding capability 未配置")
@@ -358,6 +676,8 @@ class Stage2Service:
             body=normalize_content(body),
             content_hash=digest,
             suggested_tags_json="[]",
+            source_metadata_json=source_metadata_json
+            or self._vault_source_metadata(item, body, relative_path),
         )
         session.add(version)
         await session.flush()

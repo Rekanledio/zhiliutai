@@ -41,6 +41,12 @@ npm --prefix frontend run dev
 
 阶段 2 人工闭环使用专用测试 Vault，验证真实 Chat provider、FastEmbed、审核发布、Obsidian 打开与连续多次外部修改。人工浏览器验收与 Playwright 自动化是两个不同结论：前者已完成，后者仍等待 CI/browser-capable environment。
 
+阶段 3 使用 backend/tests/fixture_sources.py 确定性生成中文 PDF 和 DOCX
+bytes，并使用内存中的静态 HTML 与 httpx.MockTransport，覆盖 PDF 页码、
+DOCX 标题层级/表格行、网页标题层级/最终 URL、网页快照 Artifact、统一草稿/
+审核/发布/Chunk locator，以及 URL 私网地址和重定向目的地复验。测试不访问
+真实网页，不读取 Cookie 或个人文件，也不提交二进制 fixture。
+
 前端覆盖 Dashboard、最终 Health 组件、七项导航、Inbox 提交、Job 状态、审核、发布、Obsidian watcher 状态、统一错误与后端 Request ID、请求超时、AbortController 取消和离线降级。
 
 ## 环境能力门禁
@@ -48,6 +54,7 @@ npm --prefix frontend run dev
 - Docker build：GitHub Actions 或具备 Docker 的环境；不要求本机安装 Docker。
 - 真实浏览器自动化：Playwright CI 或浏览器能力正常的环境。当前 automated component verification passed，人工浏览器闭环 passed；Playwright E2E pending。
 - FFmpeg：阶段 5 视频验收再验证；当前未安装且不自行安装。
+- 阶段 3 URL 获取：只测试公网 DNS 解析和 mock transport；不使用真实个人网页凭据。
 
 ## 数据安全
 

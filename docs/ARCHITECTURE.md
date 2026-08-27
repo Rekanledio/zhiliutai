@@ -81,13 +81,37 @@ Text / Markdown
 
 `ContentVersion` 保留每次稳定修改的历史；Chunk、FTS5 与 Qdrant 是可重建的当前检索投影。每次发布、网页修改、watcher 重索引和进程首次 rescan 都会按 `knowledge_item_id` 收敛 Qdrant，并确保 SQLite Chunk/FTS5 与 `current_content_version_id` 对齐。未来若改为多进程，必须先引入跨进程协调，不能直接复制 watcher。
 
-## 6. Provider 与 Graph 边界
+## 6. 阶段 3 统一 Source Pipeline
+
+阶段 3 的 PDF、DOCX 和静态网页入口复用同一条来源管线：输入校验 → 原始
+SourceArtifact → 持久化 ProcessingJob → 来源获取/解析 → 草稿 → 审核 →
+Vault 发布 → Chunk/FTS5/Qdrant 当前版本索引。文本/Markdown 继续使用同一个
+Job handler，不另建第二套业务流程。
+
+- POST /api/sources/files 只接受 PDF 和 DOCX，上传内容进入受控的内容寻址
+  Artifact；文件名只用于显示和来源元数据，不决定存储路径。
+- POST /api/sources/url 只接受无需登录的静态 HTML。请求不携带 Cookie；URL
+  只允许 http/https、不允许用户凭据，DNS 解析出的每个地址都必须是公网地址。
+  每一跳重定向都会重新执行校验，并受超时、类型、大小和跳数限制。
+- 解析器输出 SourceBlock。PDF block 保存 page/page_label，DOCX block 保存
+  heading_path/heading_level 或表格行，网页 block 保存最终 URL 和标题层级。
+  解析出的 block 文本及 locator 以可重建的 ContentVersion.source_metadata_json
+  保存，不形成用户可编辑正文主库。
+- IndexService 从这些 segments 生成带 JSON locator 的 Chunk.source_locator；
+  Qdrant payload 继续复用相同 locator，因此后续 Citation 可以回到 PDF 页码、
+  DOCX 标题层级或网页 URL。网页原始 URL 请求和最终 HTML 快照都作为
+  SourceArtifact 保留。
+
+合成 PDF/DOCX fixture 由 backend/tests/fixture_sources.py 在测试中确定性生成，
+不提交来源不明的二进制材料。
+
+## 7. Provider 与 Graph 边界
 
 Chat、Embedding、ASR、Vision、Reranker 是独立 capability。阶段 2 使用 Chat 与 Embedding；测试注入确定性 provider，不读取真实 secret。
 
 LangChain 只用于文档、切分、Embedding、Retriever、Prompt/Message、LLM 和 Tool 等合适抽象。最终两个主要 LangGraph 是 `IngestionGraph` 与 `QuestionAnswerGraph`；Graph 负责编排、路由、条件分支和需要的 checkpoint/HITL，业务逻辑留在普通 service。
 
-## 7. Health
+## 8. Health
 
 `GET /api/health` 检查：
 
@@ -102,7 +126,7 @@ LangChain 只用于文档、切分、Embedding、Retriever、Prompt/Message、LL
 
 状态统一为 `healthy/degraded/not_configured/configured/unavailable`。Vault 或模型未配置不会伪装正常；FFmpeg 缺失只影响后续视频能力，不拖垮 API。Request ID、404/422/500 统一错误形状和单次结构化异常日志继续保留。
 
-## 8. Docker、CI 与浏览器
+## 9. Docker、CI 与浏览器
 
 Dockerfile 构建 React 后由 FastAPI 托管静态产物，容器启动时执行 SQLite migration。Docker 是 delivery/CI concern，不是本地 prerequisite。`compose.yaml` 已移除。
 

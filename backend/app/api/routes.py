@@ -1,7 +1,7 @@
 import json
 from datetime import datetime
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, File, Form, Request, UploadFile
 from sqlalchemy import func, select
 
 from app.core.errors import ApplicationError
@@ -24,6 +24,7 @@ from app.schemas.stage2 import (
     ReviewRequest,
     SubmissionResponse,
     TextSourceRequest,
+    UrlSourceRequest,
 )
 from app.services.health import build_health_report
 from app.services.stage2 import Stage2Service
@@ -57,9 +58,13 @@ def item_out(
     binding: NoteBinding | None = None,
 ) -> ItemResponse:
     tags: list[str] = []
+    source_metadata: dict[str, object] | None = None
     if version is not None:
         parsed = json.loads(version.suggested_tags_json)
         tags = [str(tag) for tag in parsed] if isinstance(parsed, list) else []
+        parsed_metadata = json.loads(version.source_metadata_json or "{}")
+        if isinstance(parsed_metadata, dict):
+            source_metadata = parsed_metadata
     return ItemResponse(
         id=item.id,
         title=item.title,
@@ -69,6 +74,7 @@ def item_out(
         body=version.body if version else None,
         summary=version.summary if version else None,
         suggested_tags=tags,
+        source_metadata=source_metadata,
         version_no=version.version_no if version else None,
         note_relative_path=binding.relative_path if binding else None,
         sync_state=binding.sync_state if binding else None,
@@ -198,6 +204,45 @@ async def add_text(payload: TextSourceRequest, request: Request) -> SubmissionRe
     )
 
 
+@router.post(
+    "/sources/files", response_model=SubmissionResponse, status_code=202, tags=["sources"]
+)
+async def add_file(
+    request: Request,
+    file: UploadFile = File(...),
+    title: str | None = Form(default=None, max_length=300),
+    idempotency_key: str | None = Form(default=None, min_length=1, max_length=200),
+) -> SubmissionResponse:
+    settings = request.app.state.settings
+    content = await file.read(settings.source_max_bytes + 1)
+    item, job, deduplicated = await service(request).submit_file(
+        content,
+        file.filename,
+        file.content_type,
+        title,
+        idempotency_key,
+    )
+    return SubmissionResponse(
+        item_id=item.id, job_id=job.id, deduplicated=deduplicated
+    )
+
+
+@router.post(
+    "/sources/url", response_model=SubmissionResponse, status_code=202, tags=["sources"]
+)
+async def add_url(
+    payload: UrlSourceRequest, request: Request
+) -> SubmissionResponse:
+    item, job, deduplicated = await service(request).submit_url(
+        payload.url,
+        payload.title,
+        payload.idempotency_key,
+    )
+    return SubmissionResponse(
+        item_id=item.id, job_id=job.id, deduplicated=deduplicated
+    )
+
+
 @router.get("/jobs", response_model=list[JobResponse], tags=["jobs"])
 async def list_jobs(request: Request) -> list[JobResponse]:
     async with request.app.state.session_factory() as session:
@@ -292,11 +337,24 @@ async def reprocess_item(item_id: str, request: Request) -> SubmissionResponse:
         artifact = artifact_result.scalar_one_or_none()
         if artifact is None:
             raise ApplicationError(409, "artifact_missing", "原始 Artifact 不存在")
+        payload: dict[str, object] = {
+            "item_id": item.id,
+            "artifact_id": artifact.id,
+            "source_type": item.source_type,
+            "title_provided": True,
+        }
+        if item.source_type == "webpage":
+            try:
+                source_locator = json.loads(artifact.source_locator or "{}")
+            except json.JSONDecodeError as error:
+                raise ApplicationError(409, "source_url_missing", "网页来源 URL 不存在") from error
+            url = source_locator.get("url") if isinstance(source_locator, dict) else None
+            if not isinstance(url, str) or not url:
+                raise ApplicationError(409, "source_url_missing", "网页来源 URL 不存在")
+            payload["url"] = url
         job = ProcessingJob(
-            kind="ingest_text",
-            payload_json=json.dumps(
-                {"item_id": item.id, "artifact_id": artifact.id}, ensure_ascii=False
-            ),
+            kind="ingest_source",
+            payload_json=json.dumps(payload, ensure_ascii=False),
         )
         session.add(job)
         await session.flush()

@@ -11,6 +11,12 @@ class TextSourceRequest(BaseModel):
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
 
 
+class UrlSourceRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=2048)
+    title: str | None = Field(default=None, max_length=300)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+
+
 class SubmissionResponse(BaseModel):
     item_id: str
     job_id: str
@@ -36,6 +42,7 @@ class ItemResponse(BaseModel):
     body: str | None = None
     summary: str | None = None
     suggested_tags: list[str] = []
+    source_metadata: dict[str, object] | None = None
     version_no: int | None = None
     note_relative_path: str | None = None
     sync_state: str | None = None

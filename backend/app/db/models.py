@@ -81,6 +81,7 @@ class ContentVersion(Base):
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     suggested_tags_json: Mapped[str] = mapped_column(Text, default="[]")
     prompt_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    source_metadata_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 

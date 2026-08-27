@@ -87,7 +87,10 @@ def create_app(
     stage2 = Stage2Service(resolved_settings, session_factory, draft_provider, embedding_provider)
     runner = JobRunner(
         session_factory,
-        handlers={"ingest_text": stage2.process_ingestion},
+        handlers={
+            "ingest_text": stage2.process_ingestion,
+            "ingest_source": stage2.process_ingestion,
+        },
     )
 
     @asynccontextmanager
