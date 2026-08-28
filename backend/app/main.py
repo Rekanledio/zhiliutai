@@ -24,6 +24,7 @@ from app.core.errors import (
     validation_exception_handler,
 )
 from app.core.logging import configure_logging
+from app.core.safety import redact_sensitive_text
 from app.db.session import create_engine
 from app.obsidian.state import watcher_state
 from app.providers.models import (
@@ -36,12 +37,23 @@ from app.providers.models import (
     ProviderNotConfigured,
 )
 from app.providers.rag import OpenAICompatibleRagChatProvider, RagChatProvider
+from app.providers.video import ASRProvider, OCRProvider, SceneDetector, VideoSourceProvider, VisionProvider
 from app.rag.citations import CitationBuilder
 from app.rag.question_answer import QuestionAnswerService
 from app.rag.reranking import RerankerProvider
 from app.rag.retrieval import HybridRetriever
 from app.services.jobs import JobRunner
+from app.services.knowledge import KnowledgeApplicationService
 from app.services.stage2 import Stage2Service
+from app.workflows.production import (
+    IngestionWorkflowCoordinator,
+    Stage2IngestionWorkflowServices,
+)
+from app.workflows.question_answer_production import (
+    ProductionQuestionAnswerWorkflowServices,
+    QuestionAnswerWorkflowCoordinator,
+)
+from app.workflows.runtime import WorkflowRuntime
 
 
 def normalize_request_id(value: str | None) -> str:
@@ -72,6 +84,12 @@ def create_app(
     embedding_provider: EmbeddingProvider | None = None,
     rag_chat_provider: RagChatProvider | None = None,
     reranker: RerankerProvider | None = None,
+    video_provider: VideoSourceProvider | None = None,
+    asr_provider: ASRProvider | None = None,
+    audio_extractor=None,
+    scene_detector: SceneDetector | None = None,
+    vision_provider: VisionProvider | None = None,
+    ocr_provider: OCRProvider | None = None,
     *,
     start_background: bool = True,
     serve_frontend: bool = True,
@@ -97,7 +115,18 @@ def create_app(
             rag_chat_provider = OpenAICompatibleRagChatProvider(resolved_settings)
         except ProviderNotConfigured:
             rag_chat_provider = None
-    stage2 = Stage2Service(resolved_settings, session_factory, draft_provider, embedding_provider)
+    stage2 = Stage2Service(
+        resolved_settings,
+        session_factory,
+        draft_provider,
+        embedding_provider,
+        video_provider=video_provider,
+        asr_provider=asr_provider,
+        audio_extractor=audio_extractor,
+        scene_detector=scene_detector,
+        vision_provider=vision_provider,
+        ocr_provider=ocr_provider,
+    )
     rag_retriever = HybridRetriever(
         session_factory,
         stage2.vector_store,
@@ -105,18 +134,48 @@ def create_app(
         resolved_settings,
         reranker=reranker,
     )
-    citation_builder = CitationBuilder(session_factory)
+    citation_builder = CitationBuilder(
+        session_factory,
+        artifact_store=stage2.artifacts,
+        vault=stage2.vault() if resolved_settings.vault_root is not None else None,
+    )
     question_answer_service = QuestionAnswerService(
         session_factory,
         rag_retriever,
         citation_builder,
         rag_chat_provider,
+        mutation_lock=stage2.mutation_lock,
+    )
+    knowledge_service = KnowledgeApplicationService(
+        stage2,
+        rag_retriever,
+        citation_builder,
+        session_factory,
+    )
+    ingestion_workflow_services = Stage2IngestionWorkflowServices(stage2, session_factory)
+    question_answer_workflow_services = ProductionQuestionAnswerWorkflowServices(
+        question_answer_service
+    )
+    workflow_runtime = WorkflowRuntime(
+        ingestion_services=ingestion_workflow_services,
+        question_answer_services=question_answer_workflow_services,
+        settings=resolved_settings,
+    )
+    ingestion_workflow = IngestionWorkflowCoordinator(
+        workflow_runtime,
+        ingestion_workflow_services,
+        session_factory,
+    )
+    question_answer_workflow = QuestionAnswerWorkflowCoordinator(
+        workflow_runtime,
+        question_answer_workflow_services,
     )
     runner = JobRunner(
         session_factory,
         handlers={
-            "ingest_text": stage2.process_ingestion,
-            "ingest_source": stage2.process_ingestion,
+            "ingest_text": ingestion_workflow.run_job,
+            "ingest_source": ingestion_workflow.run_job,
+            "ingest_video": ingestion_workflow.run_job,
         },
     )
 
@@ -130,33 +189,40 @@ def create_app(
             bind_port=resolved_settings.api_port,
         )
         tasks: list[asyncio.Task[None]] = []
-        if start_background:
-            try:
-                await runner.recover_interrupted()
-                tasks.append(asyncio.create_task(runner.run_forever()))
-                if resolved_settings.vault_root is not None:
-                    tasks.append(
-                        asyncio.create_task(
-                            watcher_loop(
-                                stage2,
-                                resolved_settings.obsidian_watch_interval_seconds,
+        runtime_open = False
+        try:
+            await workflow_runtime.__aenter__()
+            runtime_open = True
+            if start_background:
+                try:
+                    await runner.recover_interrupted()
+                    tasks.append(asyncio.create_task(runner.run_forever()))
+                    if resolved_settings.vault_root is not None:
+                        tasks.append(
+                            asyncio.create_task(
+                                watcher_loop(
+                                    stage2,
+                                    resolved_settings.obsidian_watch_interval_seconds,
+                                )
                             )
                         )
+                except Exception as error:
+                    structlog.get_logger("app").info(
+                        "background_services_not_started",
+                        error_type=type(error).__name__,
                     )
-            except Exception as error:
-                structlog.get_logger("app").info(
-                    "background_services_not_started",
-                    error_type=type(error).__name__,
-                )
-        yield
-        runner.stop()
-        for task in tasks:
-            task.cancel()
-        for task in tasks:
-            with suppress(asyncio.CancelledError):
-                await task
-        await engine.dispose()
-        structlog.get_logger("app").info("application_stopped")
+            yield
+        finally:
+            runner.stop()
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                with suppress(asyncio.CancelledError):
+                    await task
+            if runtime_open:
+                await workflow_runtime.aclose()
+            await engine.dispose()
+            structlog.get_logger("app").info("application_stopped")
 
     app = FastAPI(
         title=resolved_settings.app_name,
@@ -172,7 +238,13 @@ def create_app(
     app.state.citation_builder = citation_builder
     app.state.rag_chat_provider = rag_chat_provider
     app.state.question_answer_service = question_answer_service
+    app.state.knowledge_service = knowledge_service
+    app.state.workflow_runtime = workflow_runtime
+    app.state.ingestion_workflow = ingestion_workflow
+    app.state.question_answer_workflow = question_answer_workflow
+    app.state.question_answer_workflow_services = question_answer_workflow_services
     app.state.job_runner = runner
+    app.state.video_service = stage2.video_service
     frontend_dist = PROJECT_ROOT / "frontend" / "dist"
     app.add_middleware(
         CORSMiddleware,
@@ -194,7 +266,7 @@ def create_app(
             "request_completed",
             request_id=request_id,
             method=request.method,
-            path=request.url.path,
+            path=redact_sensitive_text(request.url.path),
             status_code=response.status_code,
         )
         return response

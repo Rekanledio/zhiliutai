@@ -4,7 +4,10 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.rag.retrieval import HybridRetriever
 
 
 @dataclass(frozen=True)
@@ -12,6 +15,7 @@ class EvalCase:
     case_id: str
     query: str
     relevant_chunk_ids: frozenset[str]
+    relevant_markers: tuple[str, ...] = ()
 
 
 def load_eval_cases(path: Path) -> tuple[EvalCase, ...]:
@@ -25,6 +29,7 @@ def load_eval_cases(path: Path) -> tuple[EvalCase, ...]:
         case_id = raw.get("id")
         query = raw.get("query")
         relevant = raw.get("relevant_chunk_ids")
+        markers = raw.get("relevant_markers", [])
         if (
             not isinstance(case_id, str)
             or not case_id
@@ -33,10 +38,31 @@ def load_eval_cases(path: Path) -> tuple[EvalCase, ...]:
             or not isinstance(relevant, list)
             or not relevant
             or any(not isinstance(chunk_id, str) or not chunk_id for chunk_id in relevant)
+            or not isinstance(markers, list)
+            or any(not isinstance(marker, str) or not marker for marker in markers)
         ):
             raise ValueError("评测用例字段无效")
-        cases.append(EvalCase(case_id, query, frozenset(relevant)))
+        cases.append(EvalCase(case_id, query, frozenset(relevant), tuple(markers)))
     return tuple(cases)
+
+
+async def evaluate_retriever(
+    retriever: HybridRetriever,
+    cases: Sequence[EvalCase],
+    *,
+    k: int = 5,
+) -> dict[str, Any]:
+    """Run the fixed cases through the configured HybridRetriever."""
+
+    if k <= 0:
+        raise ValueError("评测 k 必须为正数")
+    rankings: dict[str, list[str]] = {}
+    for case in cases:
+        chunks, _diagnostics, _assessment = await retriever.retrieve(
+            case.query, limit=k
+        )
+        rankings[case.case_id] = [chunk.chunk_id for chunk in chunks]
+    return evaluate_rankings(cases, rankings, k=k)
 
 
 def evaluate_rankings(

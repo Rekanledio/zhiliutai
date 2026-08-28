@@ -23,11 +23,35 @@ class RetrievalError(RuntimeError):
     """Both retrieval channels failed for an otherwise valid query."""
 
 
+StableChunkKey = tuple[str, str, int, str, str, str, str]
+
+
+def _stable_chunk_key(
+    item_content_hash: object,
+    version_content_hash: object,
+    ordinal: object,
+    chunk_content_hash: object,
+    source_type: object,
+    source_locator: object,
+    content: object,
+) -> StableChunkKey:
+    return (
+        str(item_content_hash or ""),
+        str(version_content_hash or ""),
+        int(ordinal),
+        str(chunk_content_hash or ""),
+        str(source_type or ""),
+        str(source_locator or ""),
+        str(content or ""),
+    )
+
+
 @dataclass(frozen=True)
 class ChannelHit:
     chunk_id: str
     rank: int
     score: float | None = None
+    stable_key: StableChunkKey | None = None
 
 
 @dataclass(frozen=True)
@@ -90,16 +114,29 @@ def reciprocal_rank_fusion(
             item["ranks"][channel_name] = min(
                 hit.rank, item["ranks"].get(channel_name, hit.rank)
             )
+            if hit.stable_key is not None:
+                current_key = item.get("stable_key")
+                if current_key is None or hit.stable_key < current_key:
+                    item["stable_key"] = hit.stable_key
             if hit.score is not None:
                 item["scores"][channel_name] = hit.score
 
     def channel_order(name: str) -> tuple[int, str]:
         return (0 if name == "fts" else 1 if name == "vector" else 2, name)
 
-    def key(pair: tuple[str, dict[str, Any]]) -> tuple[float, int, str]:
+    def key(pair: tuple[str, dict[str, Any]]) -> tuple[float, int, int, StableChunkKey, str]:
         chunk_id, item = pair
         best_rank = min(item["ranks"].values()) if item["ranks"] else 2**31 - 1
-        return (-item["rrf_score"], best_rank, chunk_id)
+        stable_key = item.get("stable_key")
+        if stable_key is None:
+            return (
+                -item["rrf_score"],
+                best_rank,
+                1,
+                ("", "", 2**31 - 1, "", "", "", ""),
+                chunk_id,
+            )
+        return (-item["rrf_score"], best_rank, 0, stable_key, "")
 
     output: list[FusedHit] = []
     for chunk_id, item in sorted(fused.items(), key=key):
@@ -169,7 +206,10 @@ class _VectorCandidate:
     knowledge_item_id: str
     source_type: str
     source_locator: str
+    embedding_model: str
+    embedding_version: str
     score: float
+    stable_key: StableChunkKey | None = None
 
 
 class HybridRetriever:
@@ -273,7 +313,12 @@ class HybridRetriever:
                 parameters[name] = source_type
             source_clause = f"AND k.source_type IN ({', '.join(names)})"
         statement = text(
-            "SELECT c.id AS chunk_id, bm25(chunk_fts) AS bm25_score "
+            "SELECT c.id AS chunk_id, "
+            "k.content_hash AS item_content_hash, "
+            "v.content_hash AS version_content_hash, "
+            "c.ordinal AS ordinal, c.content_hash AS chunk_content_hash, "
+            "c.source_type AS source_type, c.source_locator AS source_locator, "
+            "c.content AS content, bm25(chunk_fts) AS bm25_score "
             "FROM chunk_fts "
             "JOIN chunks AS c ON c.id = chunk_fts.chunk_id "
             "JOIN knowledge_items AS k ON k.id = c.knowledge_item_id "
@@ -285,7 +330,9 @@ class HybridRetriever:
             "AND k.deleted_at IS NULL "
             "AND k.current_content_version_id = c.content_version_id "
             f"{source_clause} "
-            "ORDER BY bm25_score ASC, c.id ASC "
+            "ORDER BY bm25_score ASC, k.content_hash ASC, v.content_hash ASC, "
+            "c.ordinal ASC, c.content_hash ASC, c.source_type ASC, "
+            "c.source_locator ASC, c.content ASC "
             "LIMIT :limit"
         )
         async with self.session_factory() as session:
@@ -295,6 +342,15 @@ class HybridRetriever:
                 chunk_id=str(row["chunk_id"]),
                 rank=index,
                 score=float(row["bm25_score"]),
+                stable_key=_stable_chunk_key(
+                    row["item_content_hash"],
+                    row["version_content_hash"],
+                    row["ordinal"],
+                    row["chunk_content_hash"],
+                    row["source_type"],
+                    row["source_locator"],
+                    row["content"],
+                ),
             )
             for index, row in enumerate(rows, start=1)
         ]
@@ -324,8 +380,69 @@ class HybridRetriever:
             knowledge_item_id=payload["knowledge_item_id"],
             source_type=payload["source_type"],
             source_locator=payload["source_locator"],
+            embedding_model=payload["embedding_model"],
+            embedding_version=payload["embedding_version"],
             score=float(score),
         )
+
+    async def _validate_vector_candidates(
+        self,
+        candidates: Sequence[_VectorCandidate],
+        source_types: Sequence[str] | None,
+    ) -> list[_VectorCandidate]:
+        if not candidates:
+            return []
+        candidate_ids = list(dict.fromkeys(candidate.chunk_id for candidate in candidates))
+        async with self.session_factory() as session:
+            statement = (
+                select(Chunk, ContentVersion, KnowledgeItem)
+                .join(ContentVersion, ContentVersion.id == Chunk.content_version_id)
+                .join(KnowledgeItem, KnowledgeItem.id == Chunk.knowledge_item_id)
+                .where(
+                    Chunk.id.in_(candidate_ids),
+                    Chunk.knowledge_item_id == KnowledgeItem.id,
+                    ContentVersion.knowledge_item_id == KnowledgeItem.id,
+                    KnowledgeItem.status == "published",
+                    KnowledgeItem.deleted_at.is_(None),
+                    KnowledgeItem.current_content_version_id == ContentVersion.id,
+                    KnowledgeItem.current_content_version_id == Chunk.content_version_id,
+                )
+            )
+            if source_types:
+                statement = statement.where(KnowledgeItem.source_type.in_(source_types))
+            rows = (await session.execute(statement)).all()
+        authoritative = {chunk.id: (chunk, version, item) for chunk, version, item in rows}
+        valid: list[_VectorCandidate] = []
+        for candidate in candidates:
+            row = authoritative.get(candidate.chunk_id)
+            if row is None:
+                continue
+            chunk, version, item = row
+            if (
+                candidate.knowledge_item_id != item.id
+                or candidate.content_version_id != version.id
+                or candidate.source_type != item.source_type
+                or candidate.source_type != chunk.source_type
+                or candidate.source_locator != chunk.source_locator
+                or candidate.embedding_model != chunk.embedding_model
+                or candidate.embedding_version != chunk.embedding_version
+            ):
+                continue
+            valid.append(
+                replace(
+                    candidate,
+                    stable_key=_stable_chunk_key(
+                        item.content_hash,
+                        version.content_hash,
+                        chunk.ordinal,
+                        chunk.content_hash,
+                        chunk.source_type,
+                        chunk.source_locator,
+                        chunk.content,
+                    ),
+                )
+            )
+        return valid
 
     async def _search_vector(
         self,
@@ -346,17 +463,27 @@ class HybridRetriever:
             content_version_ids=[item.version_id for item in current_versions],
             source_types=source_types,
         )
-        candidates: list[ChannelHit] = []
+        raw_candidates: list[_VectorCandidate] = []
         for raw in raw_results:
             if not isinstance(raw, dict):
                 continue
             candidate = self._validate_vector_candidate(raw)
             if candidate is None:
                 continue
-            candidates.append(
-                ChannelHit(candidate.chunk_id, len(candidates) + 1, candidate.score)
-            )
-        return candidates
+            raw_candidates.append(candidate)
+        candidates = await self._validate_vector_candidates(raw_candidates, source_types)
+        candidates = sorted(
+            candidates,
+            key=lambda candidate: (
+                -candidate.score,
+                candidate.stable_key
+                or ("", "", 2**31 - 1, "", "", "", candidate.chunk_id),
+            ),
+        )
+        return [
+            ChannelHit(candidate.chunk_id, rank, candidate.score, candidate.stable_key)
+            for rank, candidate in enumerate(candidates, start=1)
+        ]
 
     async def _rehydrate(
         self,
@@ -400,6 +527,7 @@ class HybridRetriever:
                     source_type=chunk.source_type,
                     content=chunk.content,
                     source_locator=chunk.source_locator,
+                    ordinal=chunk.ordinal,
                     content_hash=chunk.content_hash or content_hash(chunk.content),
                     matched_by=hit.matched_by,
                     fts_rank=hit.fts_rank,

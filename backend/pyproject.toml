@@ -9,6 +9,8 @@ dependencies = [
     "alembic==1.16.4",
     "fastapi==0.116.1",
     "httpx==0.28.1",
+    "langgraph==1.2.11",
+    "langgraph-checkpoint-sqlite==3.1.1",
     "pypdf==5.9.0",
     "pydantic-settings==2.10.1",
     "python-multipart==0.0.20",
@@ -17,6 +19,7 @@ dependencies = [
     "sqlalchemy[asyncio]==2.0.43",
     "structlog==25.4.0",
     "uvicorn[standard]==0.35.0",
+    "mcp==2.1.1",
 ]
 
 [dependency-groups]

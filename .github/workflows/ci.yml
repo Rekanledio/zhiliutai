@@ -23,10 +23,13 @@ jobs:
       - run: uv lock --project backend --check
       - run: uv run --directory backend ruff check app tests
       - run: uv run --directory backend pytest
-      - name: Verify SQLite migration online
+      - name: Verify SQLite migration upgrade downgrade upgrade
         env:
           DATABASE_URL: sqlite+aiosqlite:////tmp/zhiliutai-ci.db
-        run: uv run --directory backend alembic upgrade head
+        run: |
+          uv run --directory backend alembic upgrade head
+          uv run --directory backend alembic downgrade base
+          uv run --directory backend alembic upgrade head
 
   frontend:
     runs-on: ubuntu-latest
@@ -41,6 +44,33 @@ jobs:
       - run: npm --prefix frontend run typecheck
       - run: npm --prefix frontend run test
       - run: npm --prefix frontend run build
+
+  playwright:
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run e2e:typecheck
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e
+      - name: Upload Playwright failure artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          if-no-files-found: ignore
 
   docker:
     runs-on: ubuntu-latest

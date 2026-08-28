@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
+from app.core.paths import safe_relative_path
 from app.services.content import content_hash, normalize_content
 
 
@@ -19,6 +20,14 @@ class ManagedNote:
     def zhiliu_id(self) -> str | None:
         value = self.metadata.get("zhiliu_id")
         return value if isinstance(value, str) else None
+
+
+@dataclass(frozen=True)
+class StagedWrite:
+    """A same-directory Vault write that is not visible as the final note yet."""
+
+    relative_path: str
+    temp_path: Path
 
 
 def _scalar(value: object) -> str:
@@ -110,15 +119,18 @@ def safe_note_name(title: str, item_id: str) -> str:
 class ObsidianVault:
     def __init__(self, vault_root: Path, managed_dir: str) -> None:
         self.vault_root = vault_root.resolve()
-        self.managed_root = (self.vault_root / managed_dir).resolve()
+        safe_managed_dir = safe_relative_path(managed_dir)
+        if safe_managed_dir is None:
+            raise ValueError("受管理 Vault 目录无效")
+        self.managed_root = (self.vault_root / safe_managed_dir).resolve()
         if not self.managed_root.is_relative_to(self.vault_root):
             raise ValueError("受管理 Vault 路径越界")
 
     def resolve(self, relative_path: str) -> Path:
-        relative = Path(relative_path)
-        if relative.is_absolute() or ".." in relative.parts:
+        safe_path = safe_relative_path(relative_path)
+        if safe_path is None:
             raise ValueError("Vault 相对路径无效")
-        target = (self.managed_root / relative).resolve()
+        target = (self.managed_root / safe_path).resolve()
         if not target.is_relative_to(self.managed_root):
             raise ValueError("Vault 路径越界")
         return target
@@ -126,7 +138,14 @@ class ObsidianVault:
     def publish_path(self, title: str, item_id: str) -> str:
         return (Path("Notes") / safe_note_name(title, item_id)).as_posix()
 
-    def atomic_write(self, relative_path: str, content: str) -> None:
+    def _validate_staged(self, staged: StagedWrite) -> tuple[Path, Path]:
+        target = self.resolve(staged.relative_path)
+        temporary = staged.temp_path.resolve()
+        if temporary.parent != target.parent or not temporary.is_relative_to(self.managed_root):
+            raise ValueError("Vault 暂存文件路径无效")
+        return target, temporary
+
+    def stage_bytes(self, relative_path: str, content: bytes) -> StagedWrite:
         target = self.resolve(relative_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temp_name = tempfile.mkstemp(
@@ -134,13 +153,40 @@ class ObsidianVault:
         )
         temp_path = Path(temp_name)
         try:
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            with os.fdopen(descriptor, "wb") as handle:
                 handle.write(content)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temp_path, target)
-        finally:
+            return StagedWrite(relative_path, temp_path)
+        except BaseException:
             temp_path.unlink(missing_ok=True)
+            raise
+
+    def stage_write(self, relative_path: str, content: str) -> StagedWrite:
+        return self.stage_bytes(relative_path, content.encode("utf-8"))
+
+    def commit_staged(self, staged: StagedWrite) -> None:
+        target, temporary = self._validate_staged(staged)
+        if not temporary.is_file():
+            raise OSError("Vault 暂存文件不可用")
+        os.replace(temporary, target)
+
+    def discard_staged(self, staged: StagedWrite) -> None:
+        _target, temporary = self._validate_staged(staged)
+        temporary.unlink(missing_ok=True)
+
+    def remove(self, relative_path: str) -> None:
+        self.resolve(relative_path).unlink(missing_ok=True)
+
+    def atomic_write(self, relative_path: str, content: str) -> None:
+        staged = self.stage_write(relative_path, content)
+        try:
+            self.commit_staged(staged)
+        finally:
+            self.discard_staged(staged)
+
+    def read_bytes(self, relative_path: str) -> bytes:
+        return self.resolve(relative_path).read_bytes()
 
     def read(self, relative_path: str) -> ManagedNote:
         return parse_note(self.resolve(relative_path).read_text(encoding="utf-8"))

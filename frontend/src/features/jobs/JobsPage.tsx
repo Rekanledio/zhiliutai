@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { ApiError, type ProcessingJob, getJobs, retryJob } from "../../services/api";
+import { ApiError, cancelJob, type ProcessingJob, getJobs, retryJob } from "../../services/api";
 
 export function JobsPage() {
   const [jobs, setJobs] = useState<ProcessingJob[]>([]);
@@ -23,6 +23,15 @@ export function JobsPage() {
     }
   };
 
+  const cancel = async (id: string) => {
+    try {
+      await cancelJob(id);
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason.message : "取消失败");
+    }
+  };
+
   return (
     <section className="stage-page">
       <div className="stage-heading">
@@ -34,7 +43,10 @@ export function JobsPage() {
         {jobs.length === 0 ? <p className="quiet-note">当前没有任务。</p> : jobs.map((job) => (
           <article className="knowledge-row" key={job.id}>
             <div><strong>{job.kind}</strong><span>{job.state} · {job.stage} · 重试 {job.retry_count}/{job.max_retries}</span></div>
-            {job.state === "failed" ? <button className="ghost-button" type="button" onClick={() => void retry(job.id)}>重试</button> : null}
+            <div className="row-actions">
+              {job.state === "failed" ? <button className="ghost-button" type="button" onClick={() => void retry(job.id)}>重试</button> : null}
+              {job.state === "queued" || job.state === "running" ? <button className="ghost-button" type="button" onClick={() => void cancel(job.id)}>取消</button> : null}
+            </div>
           </article>
         ))}
       </div>

@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from qdrant_client import QdrantClient
 
 from app.rag.query import QueryProcessor
 from app.rag.retrieval import (
@@ -12,7 +13,7 @@ from app.rag.retrieval import (
     reciprocal_rank_fusion,
 )
 from app.rag.types import RetrievedChunk
-from app.services.vector_store import QdrantLocalStore, VectorRecord
+from app.services.vector_store import COLLECTION_NAME, QdrantLocalStore, VectorRecord
 from conftest import wait_for_job
 
 
@@ -62,6 +63,27 @@ def test_rrf_deduplicates_and_orders_ties_deterministically() -> None:
     assert fused[0].fts_rank == 2
     assert fused[0].vector_rank == 1
     assert fused[0].rrf_score == pytest.approx(1 / 62 + 1 / 61)
+
+
+def test_rrf_prefers_stable_chunk_key_over_random_chunk_id() -> None:
+    fused = reciprocal_rank_fusion(
+        {
+            "fts": [
+                ChannelHit(
+                    "random-z",
+                    1,
+                    stable_key=("item", "version", 0, "chunk-a", "markdown", "inbox", "A"),
+                ),
+                ChannelHit(
+                    "random-a",
+                    1,
+                    stable_key=("item", "version", 1, "chunk-b", "markdown", "inbox", "B"),
+                ),
+            ]
+        }
+    )
+
+    assert [hit.chunk_id for hit in fused] == ["random-z", "random-a"]
 
 
 def test_evidence_policy_distinguishes_none_low_and_sufficient() -> None:
@@ -152,6 +174,35 @@ async def test_hybrid_retrieval_uses_sqlite_current_published_authority(
     deleted_chunks, _, deleted_assessment = await retriever.retrieve("SQLite FTS5", limit=10)
     assert current_item_id not in {chunk.knowledge_item_id for chunk in deleted_chunks}
     assert deleted_assessment.status in {"none", "low_confidence"}
+
+
+@pytest.mark.asyncio
+async def test_hybrid_retrieval_drops_qdrant_payload_mismatch_with_sqlite(
+    client: TestClient,
+) -> None:
+    item_id = _publish(client, "Qdrant payload 必须与 SQLite 当前版本完全一致。")
+    database_path = client.app.state.settings.database_path
+    with sqlite3.connect(database_path) as connection:
+        point_id = connection.execute(
+            "SELECT qdrant_point_id FROM chunks WHERE knowledge_item_id = ?",
+            (item_id,),
+        ).fetchone()[0]
+    qdrant = QdrantClient(path=str(client.app.state.settings.qdrant_path))
+    try:
+        qdrant.set_payload(
+            collection_name=COLLECTION_NAME,
+            payload={"source_locator": "Notes/forged-locator.md"},
+            points=[point_id],
+        )
+    finally:
+        qdrant.close()
+
+    chunks, _diagnostics, _assessment = await client.app.state.rag_retriever.retrieve(
+        "Qdrant payload SQLite 当前版本", limit=5
+    )
+    matching = [chunk for chunk in chunks if chunk.knowledge_item_id == item_id]
+    assert matching
+    assert all("vector" not in chunk.matched_by for chunk in matching)
 
 
 def test_qdrant_search_filters_current_version(tmp_path: Path) -> None:

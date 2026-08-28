@@ -2,21 +2,25 @@
   {
     "id": "sqlite-authority",
     "query": "SQLite 权威校验",
-    "relevant_chunk_ids": ["eval-sqlite"]
+    "relevant_chunk_ids": ["eval-sqlite"],
+    "relevant_markers": ["评测锚点：SQLite 权威校验"]
   },
   {
     "id": "citation-locator",
     "query": "Citation 精确定位",
-    "relevant_chunk_ids": ["eval-citation"]
+    "relevant_chunk_ids": ["eval-citation"],
+    "relevant_markers": ["评测锚点：Citation 精确定位"]
   },
   {
     "id": "obsidian-source",
     "query": "Obsidian Markdown 唯一主来源",
-    "relevant_chunk_ids": ["eval-obsidian"]
+    "relevant_chunk_ids": ["eval-obsidian"],
+    "relevant_markers": ["评测锚点：Obsidian Markdown 唯一主来源"]
   },
   {
     "id": "evidence-refusal",
     "query": "证据不足时拒答",
-    "relevant_chunk_ids": ["eval-evidence"]
+    "relevant_chunk_ids": ["eval-evidence"],
+    "relevant_markers": ["评测锚点：证据不足时拒答"]
   }
 ]

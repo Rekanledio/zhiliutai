@@ -160,13 +160,22 @@ async def _probe_http_model(
     api_key: str | None,
 ) -> tuple[str, str, float | None]:
     parsed = urlsplit(base_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
         return "degraded", f"{model} 地址格式无效", None
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     started = time.perf_counter()
     try:
         async with httpx.AsyncClient(
-            timeout=settings.health_check_timeout, follow_redirects=False
+            timeout=settings.health_check_timeout,
+            follow_redirects=False,
+            trust_env=False,
         ) as client:
             response = await client.get(f"{base_url.rstrip('/')}/models", headers=headers)
     except Exception as error:
@@ -194,9 +203,9 @@ async def probe_model_providers(settings: Settings) -> HealthComponent:
 
     capabilities = [
         ("Chat", settings.chat_base_url, settings.chat_model, settings.chat_api_key),
-        ("ASR", settings.asr_base_url, settings.asr_model, None),
-        ("Vision", settings.vision_base_url, settings.vision_model, None),
-        ("Reranker", settings.reranker_base_url, settings.reranker_model, None),
+        ("ASR", settings.asr_base_url, settings.asr_model, settings.asr_api_key),
+        ("Vision", settings.vision_base_url, settings.vision_model, settings.vision_api_key),
+        ("Reranker", settings.reranker_base_url, settings.reranker_model, settings.reranker_api_key),
     ]
     if settings.embedding_provider == "openai-compatible":
         capabilities.insert(
@@ -275,7 +284,8 @@ async def build_health_report(settings: Settings) -> HealthResponse:
     if any(item.key in required and item.state != "healthy" for item in components):
         overall = "degraded"
     if any(
-        item.key not in required and item.state in {"degraded", "unavailable"}
+        item.key not in required
+        and item.state in {"degraded", "unavailable", "not_configured"}
         for item in components
     ):
         overall = "degraded"

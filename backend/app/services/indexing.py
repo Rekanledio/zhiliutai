@@ -1,4 +1,5 @@
 import json
+from dataclasses import dataclass
 from uuid import uuid4
 
 from sqlalchemy import delete, text
@@ -8,6 +9,15 @@ from app.db.models import Chunk, ContentVersion, KnowledgeItem
 from app.providers.models import EmbeddingProvider
 from app.services.content import chunk_content, content_hash
 from app.services.vector_store import QdrantLocalStore, VectorRecord
+
+
+@dataclass(frozen=True)
+class PreparedIndex:
+    """Embedding and vector rows prepared for one not-yet-authoritative version."""
+
+    content_version_id: str
+    chunks: tuple[Chunk, ...]
+    records: tuple[VectorRecord, ...]
 
 
 def _locator_value(locator: object, fallback: str) -> str:
@@ -52,13 +62,12 @@ class IndexService:
         self.vector_store = vector_store
         self.embedding_provider = embedding_provider
 
-    async def index_version(
+    async def prepare_version(
         self,
-        session: AsyncSession,
         item: KnowledgeItem,
         version: ContentVersion,
         source_locator: str,
-    ) -> list[Chunk]:
+    ) -> PreparedIndex:
         parts = _version_parts(version, source_locator)
         vectors = await self.embedding_provider.embed([part for part, _ in parts])
         if len(parts) != len(vectors):
@@ -95,27 +104,58 @@ class IndexService:
                     embedding_version=self.embedding_provider.version,
                 )
             )
-        self.vector_store.upsert(records)
-        await session.execute(delete(Chunk).where(Chunk.knowledge_item_id == item.id))
-        await session.execute(
-            text("DELETE FROM chunk_fts WHERE knowledge_item_id = :item_id"),
-            {"item_id": item.id},
-        )
-        session.add_all(chunks)
-        await session.flush()
-        for chunk in chunks:
+        return PreparedIndex(version.id, tuple(chunks), tuple(records))
+
+    async def apply_prepared(
+        self,
+        session: AsyncSession,
+        item: KnowledgeItem,
+        version: ContentVersion,
+        prepared: PreparedIndex,
+    ) -> list[Chunk]:
+        if prepared.content_version_id != version.id:
+            raise ValueError("索引候选版本不匹配")
+        chunks = list(prepared.chunks)
+        try:
+            self.vector_store.upsert(prepared.records)
+            await session.execute(delete(Chunk).where(Chunk.knowledge_item_id == item.id))
             await session.execute(
-                text(
-                    "INSERT INTO chunk_fts "
-                    "(chunk_id, knowledge_item_id, content_version_id, content, source_locator) "
-                    "VALUES (:chunk_id, :item_id, :version_id, :content, :locator)"
-                ),
-                {
-                    "chunk_id": chunk.id,
-                    "item_id": item.id,
-                    "version_id": version.id,
-                    "content": chunk.content,
-                    "locator": chunk.source_locator,
-                },
+                text("DELETE FROM chunk_fts WHERE knowledge_item_id = :item_id"),
+                {"item_id": item.id},
             )
+            session.add_all(chunks)
+            await session.flush()
+            for chunk in chunks:
+                await session.execute(
+                    text(
+                        "INSERT INTO chunk_fts "
+                        "(chunk_id, knowledge_item_id, content_version_id, content, source_locator) "
+                        "VALUES (:chunk_id, :item_id, :version_id, :content, :locator)"
+                    ),
+                    {
+                        "chunk_id": chunk.id,
+                        "item_id": item.id,
+                        "version_id": version.id,
+                        "content": chunk.content,
+                        "locator": chunk.source_locator,
+                    },
+                )
+        except BaseException:
+            # upsert can fail after partially writing a batch.  Delete by the
+            # candidate version, never by item, so the old current vectors stay.
+            try:
+                self.vector_store.delete_version(version.id)
+            except Exception:
+                pass
+            raise
         return chunks
+
+    async def index_version(
+        self,
+        session: AsyncSession,
+        item: KnowledgeItem,
+        version: ContentVersion,
+        source_locator: str,
+    ) -> list[Chunk]:
+        prepared = await self.prepare_version(item, version, source_locator)
+        return await self.apply_prepared(session, item, version, prepared)

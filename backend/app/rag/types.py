@@ -16,6 +16,7 @@ class RetrievedChunk:
     source_type: str
     content: str
     source_locator: str
+    ordinal: int = 0
     content_hash: str = ""
     matched_by: tuple[str, ...] = ()
     fts_rank: int | None = None
@@ -57,13 +58,18 @@ class RetrievalDiagnostics:
     reranker_available: bool = False
 
     def as_dict(self) -> dict[str, Any]:
+        from app.core.safety import redact_sensitive_text
+
         return {
-            "original_query": self.original_query,
-            "normalized_query": self.normalized_query,
-            "fts_query": self.fts_query,
+            "original_query": redact_sensitive_text(self.original_query),
+            "normalized_query": redact_sensitive_text(self.normalized_query),
+            "fts_query": redact_sensitive_text(self.fts_query) if self.fts_query else None,
             "fts_available": self.fts_available,
             "vector_available": self.vector_available,
             "degraded": self.degraded,
-            "channel_errors": dict(self.channel_errors),
+            "channel_errors": {
+                redact_sensitive_text(str(key)): redact_sensitive_text(str(value))
+                for key, value in self.channel_errors.items()
+            },
             "reranker_available": self.reranker_available,
         }

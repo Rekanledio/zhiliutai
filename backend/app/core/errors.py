@@ -7,6 +7,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 import structlog
 
+from app.core.safety import redact_error_details, redact_sensitive_text
+
 
 class ApplicationError(Exception):
     def __init__(
@@ -35,11 +37,11 @@ def error_payload(
 ) -> dict[str, Any]:
     error: dict[str, Any] = {
         "code": code,
-        "message": message,
+        "message": redact_sensitive_text(message),
         "request_id": request_id_for(request),
     }
     if details is not None:
-        error["details"] = details
+        error["details"] = redact_error_details(details)
     return {"error": error}
 
 
@@ -52,7 +54,7 @@ def response_headers(request: Request, extra: Mapping[str, str] | None = None) -
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
-        content=error_payload(request, "http_error", str(exc.detail)),
+        content=error_payload(request, "http_error", redact_sensitive_text(str(exc.detail))),
         headers=response_headers(request, exc.headers),
     )
 
@@ -70,16 +72,21 @@ async def validation_exception_handler(
 ) -> JSONResponse:
     return JSONResponse(
         status_code=422,
-        content=error_payload(request, "validation_error", "请求参数校验失败", exc.errors()),
+        content=error_payload(
+            request,
+            "validation_error",
+            "请求参数校验失败",
+            redact_error_details(exc.errors()),
+        ),
         headers=response_headers(request),
     )
 
 
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    structlog.get_logger("api").exception(
+    structlog.get_logger("api").error(
         "unhandled_exception",
         request_id=request_id_for(request),
-        path=request.url.path,
+        path=redact_sensitive_text(request.url.path),
         error_type=type(exc).__name__,
     )
     return JSONResponse(

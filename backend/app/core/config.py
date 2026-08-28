@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,6 +29,7 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite+aiosqlite:///data/zhiliutai.db"
     sqlite_busy_timeout_ms: int = 5000
+    workflow_checkpoint_path: Path = PROJECT_ROOT / "data" / "checkpoints" / "workflows.db"
     qdrant_path: Path = PROJECT_ROOT / "data" / "qdrant"
 
     vault_path: str | None = None
@@ -38,22 +39,40 @@ class Settings(BaseSettings):
     source_max_bytes: int = 10_000_000
     source_fetch_timeout: float = 10.0
     source_max_redirects: int = 3
+    video_max_bytes: int = 500_000_000
+    video_max_duration_seconds: int = 4 * 60 * 60
+    video_fetch_timeout: float = 60.0
+    video_max_redirects: int = 3
+    video_max_subtitle_bytes: int = 10_000_000
+    video_max_subtitle_segments: int = 50_000
+    video_max_audio_bytes: int = 100_000_000
+    video_max_keyframes: int = 2_000
+    video_media_retention_policy: Literal[
+        "permanent", "until_expiry", "delete_after_processing"
+    ] = "delete_after_processing"
+    video_media_retention_days: int = 7
+    video_ffmpeg_executable: str = "ffmpeg"
+    video_ytdlp_executable: str = "yt-dlp"
+    video_asr_fallback_enabled: bool = True
 
     chat_base_url: str | None = None
     chat_model: str | None = None
-    chat_api_key: str | None = None
+    chat_api_key: str | None = Field(default=None, repr=False)
     embedding_provider: Literal["openai-compatible", "fastembed"] = "openai-compatible"
     embedding_base_url: str | None = None
     embedding_model: str | None = None
-    embedding_api_key: str | None = None
+    embedding_api_key: str | None = Field(default=None, repr=False)
     embedding_dimensions: int = 1536
     embedding_cache_path: Path = PROJECT_ROOT / "data" / "models" / "fastembed"
     asr_base_url: str | None = None
     asr_model: str | None = None
+    asr_api_key: str | None = Field(default=None, repr=False)
     vision_base_url: str | None = None
     vision_model: str | None = None
+    vision_api_key: str | None = Field(default=None, repr=False)
     reranker_base_url: str | None = None
     reranker_model: str | None = None
+    reranker_api_key: str | None = Field(default=None, repr=False)
 
     rag_query_max_chars: int = 2_000
     rag_rrf_k: int = 60
@@ -73,7 +92,13 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    @field_validator("artifact_root", "qdrant_path", "embedding_cache_path", mode="before")
+    @field_validator(
+        "artifact_root",
+        "qdrant_path",
+        "embedding_cache_path",
+        "workflow_checkpoint_path",
+        mode="before",
+    )
     @classmethod
     def resolve_data_path(cls, value: str | Path) -> Path:
         return resolve_project_path(value)

@@ -52,6 +52,44 @@ class InvalidCitationProvider(CountingRagProvider):
         )
 
 
+class SwitchingRagProvider(CountingRagProvider):
+    def __init__(self, stage2, item_id: str) -> None:
+        super().__init__()
+        self.stage2 = stage2
+        self.item_id = item_id
+        self.switched = False
+
+    async def answer(
+        self, _query: str, evidence: Sequence[Mapping[str, str]]
+    ) -> AnswerDraft:
+        self.answer_calls += 1
+        self.last_evidence = list(evidence)
+        if not self.switched:
+            self.switched = True
+            _item, version, _binding = await self.stage2.get_item(self.item_id)
+            await self.stage2.patch_item(
+                self.item_id,
+                None,
+                "版本切换测试：新版本证据。",
+                version.content_hash,
+            )
+        return AnswerDraft(
+            claims=(AnswerClaim("版本切换后的答案。", ("C1",)),)
+        )
+
+
+class CitationReuseProvider(CountingRagProvider):
+    async def answer(
+        self, _query: str, evidence: Sequence[Mapping[str, str]]
+    ) -> AnswerDraft:
+        self.answer_calls += 1
+        self.last_evidence = list(evidence)
+        citation_id = "C1" if self.answer_calls == 1 else "C2"
+        return AnswerDraft(
+            claims=(AnswerClaim("跨回答 citation 不应被接受。", (citation_id,)),)
+        )
+
+
 def _publish_text(client: TestClient, content: str) -> str:
     submitted = client.post(
         "/api/sources/text",
@@ -87,6 +125,49 @@ def test_sufficient_answer_persists_model_run_and_citation(client: TestClient) -
     assert len([citation for citation in citations if citation.model_run_id == run.id]) == 1
 
 
+def test_version_switch_retries_and_persists_only_the_new_current_citation(
+    client: TestClient,
+) -> None:
+    item_id = _publish_text(client, "版本切换测试：旧版本证据。")
+    provider = SwitchingRagProvider(client.app.state.stage2_service, item_id)
+    service = client.app.state.question_answer_service
+    service.chat_provider = provider
+
+    result = client.portal.call(service.answer, "版本切换测试")
+
+    assert result.answer == "版本切换后的答案。"
+    assert provider.answer_calls == 2
+    runs, citations = client.portal.call(_read_audit_rows, client.app.state.session_factory)
+    assert sorted(run.status for run in runs) == ["failed", "succeeded"]
+    failed = next(run for run in runs if run.status == "failed")
+    assert json.loads(failed.error_json)["code"] == "knowledge_changed"
+    succeeded = next(run for run in runs if run.status == "succeeded")
+    persisted = [citation for citation in citations if citation.model_run_id == succeeded.id]
+    assert len(persisted) == 1
+    assert persisted[0].content_version_id == result.citations[0].content_version_id
+    assert all(citation.model_run_id == succeeded.id for citation in citations)
+
+
+def test_citation_from_another_answer_is_rejected_and_not_persisted(
+    client: TestClient,
+) -> None:
+    _publish_text(client, "跨回答 citation 必须绑定本次回答的证据。")
+    provider = CitationReuseProvider()
+    service = client.app.state.question_answer_service
+    service.chat_provider = provider
+
+    first = client.portal.call(service.answer, "跨回答 citation")
+    assert first.citations[0].citation_id == "C1"
+    with pytest.raises(AnswerValidationError):
+        client.portal.call(service.answer, "跨回答 citation")
+
+    runs, citations = client.portal.call(_read_audit_rows, client.app.state.session_factory)
+    assert len(citations) == 1
+    assert citations[0].model_run_id == first.model_run_id
+    failed = next(run for run in runs if run.status == "failed")
+    assert json.loads(failed.error_json)["code"] == "rag_answer_invalid"
+
+
 def test_insufficient_evidence_refuses_without_calling_answer_provider(
     client: TestClient,
 ) -> None:
@@ -115,8 +196,8 @@ def test_invalid_claim_citation_fails_run_without_returning_answer(
         client.portal.call(service.answer, "SQLite 证据")
 
     runs, citations = client.portal.call(_read_audit_rows, client.app.state.session_factory)
-    assert runs[-1].status == "failed"
-    assert json.loads(runs[-1].error_json)["code"] == "rag_answer_invalid"
+    failed = next(run for run in runs if run.status == "failed")
+    assert json.loads(failed.error_json)["code"] == "rag_answer_invalid"
     assert citations == []
 
 
@@ -147,6 +228,11 @@ def test_chat_stream_emits_claims_citations_and_done_events(client: TestClient) 
     assert "C1" in response.text
     assert "D:\\Work" not in response.text
     assert "api_key" not in response.text.lower()
+    assert [
+        line.removeprefix("event: ")
+        for line in response.text.splitlines()
+        if line.startswith("event:")
+    ] == ["meta", "delta", "citations", "done"]
 
 
 def test_chat_stream_returns_refusal_event_without_answer_provider_call(

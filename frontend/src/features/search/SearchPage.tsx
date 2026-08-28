@@ -6,7 +6,11 @@ import {
   type Citation,
   type EvidenceAssessment,
   type SearchResponse,
+  type VideoCitationPreview,
+  openArtifact,
+  openExternalUrl,
   openObsidian,
+  getVideoCitation,
   searchKnowledge,
   streamChat,
 } from "../../services/api";
@@ -33,6 +37,16 @@ function locatorLabel(citation: Citation): string {
   if (locator.kind === "obsidian") {
     return locator.path ? "Obsidian · " + locator.path : "Obsidian 定位";
   }
+  if (locator.kind === "video" || locator.kind === "video_chapter") {
+    return locator.start_ms !== undefined
+      ? "视频 · " + (locator.start_ms / 1000).toFixed(3) + "s"
+      : "视频时间轴";
+  }
+  if (locator.kind === "video_keyframe") {
+    return locator.start_ms !== undefined
+      ? "关键帧 · " + (locator.start_ms / 1000).toFixed(3) + "s"
+      : "关键帧定位";
+  }
   return "来源定位不可用";
 }
 
@@ -45,12 +59,33 @@ function matchedByLabel(citation: Citation): string {
 
 function CitationCard({
   citation,
+  onOpenArtifact,
+  onOpenVideoCitation,
+  onOpenUrl,
   onOpenObsidian,
 }: {
   citation: Citation;
+  onOpenArtifact: (
+    artifactId: string,
+    page?: number,
+    options?: { startMs?: number; endMs?: number; keyframeId?: string },
+  ) => void;
+  onOpenVideoCitation: (citation: Citation) => void;
+  onOpenUrl: (url: string) => void;
   onOpenObsidian: (itemId: string) => void;
 }) {
   const target = citation.target;
+  const artifactPage = target.page ?? (citation.locator.kind === "pdf" ? citation.locator.page : undefined);
+  const artifactOptions = {
+    startMs: target.start_ms ?? citation.locator.start_ms,
+    endMs: target.end_ms ?? citation.locator.end_ms,
+    keyframeId: target.keyframe_id,
+  };
+  const isVideoCitation =
+    target.kind === "artifact" &&
+    (citation.locator.kind === "video" ||
+      citation.locator.kind === "video_chapter" ||
+      citation.locator.kind === "video_keyframe");
   return (
     <article className="citation-card">
       <div className="citation-card-heading">
@@ -67,17 +102,29 @@ function CitationCard({
           {citation.locator_status === "exact" ? "精确定位" : citation.locator_status === "fallback" ? "回退定位" : "定位不可用"}
         </span>
         {target.kind === "artifact" && target.artifact_id ? (
-          <a
-            href={"/api/artifacts/" + encodeURIComponent(target.artifact_id)}
-            target="_blank"
-            rel="noreferrer"
+          <button
+            className="text-button citation-open-button"
+            type="button"
+            onClick={() =>
+              isVideoCitation
+                ? onOpenVideoCitation(citation)
+                : onOpenArtifact(target.artifact_id as string, artifactPage, artifactOptions)
+            }
           >
-            打开原始文件 ↗
-          </a>
+            {isVideoCitation ? "在应用内定位" : "打开原始文件 ↗"}
+          </button>
+        ) : target.kind === "artifact" ? (
+          <span>原始文件不可用</span>
         ) : target.kind === "url" && target.url ? (
-          <a href={target.url} target="_blank" rel="noreferrer">
+          <button
+            className="text-button citation-open-button"
+            type="button"
+            onClick={() => onOpenUrl(target.url as string)}
+          >
             打开网页 ↗
-          </a>
+          </button>
+        ) : target.kind === "url" ? (
+          <span>网页来源不可用</span>
         ) : target.kind === "obsidian" ? (
           target.item_id ? (
             <button
@@ -88,13 +135,61 @@ function CitationCard({
               在 Obsidian 打开 ↗
             </button>
           ) : (
-            <span>请在 Obsidian 中查看正文</span>
+            <span>Obsidian 笔记不可用</span>
           )
         ) : (
           <span>仅保留证据摘录</span>
         )}
       </div>
     </article>
+  );
+}
+
+function formatVideoTime(milliseconds: number): string {
+  return (milliseconds / 1000).toFixed(3) + "s";
+}
+
+function VideoCitationPanel({
+  preview,
+  error,
+  onClose,
+  onArtifactError,
+}: {
+  preview: VideoCitationPreview;
+  error: string | null;
+  onClose: () => void;
+  onArtifactError: () => void;
+}) {
+  return (
+    <section className="video-citation-panel" aria-label="视频证据定位">
+      <div className="video-citation-heading">
+        <div>
+          <span className="eyebrow">本地证据定位</span>
+          <h2>
+            视频证据 · {formatVideoTime(preview.start_ms)}–{formatVideoTime(preview.end_ms)}
+          </h2>
+        </div>
+        <button className="text-button" type="button" onClick={onClose}>
+          关闭
+        </button>
+      </div>
+      {preview.kind === "transcript" ? (
+        <div className="video-transcript-preview">
+          <span>{preview.language || "字幕"}</span>
+          <p>{preview.text || "该时间段没有可显示的字幕文本。"}</p>
+        </div>
+      ) : (
+        <div className="video-keyframe-preview">
+          <img
+            src={"/api/artifacts/" + encodeURIComponent(preview.artifact_id)}
+            alt={"关键帧 " + (preview.keyframe_id || "")}
+            onError={onArtifactError}
+          />
+          {error ? <p className="inline-error" role="alert">{error}</p> : null}
+        </div>
+      )}
+      <small>原始网络视频不是永久依赖；此处只展示当前已授权的 transcript 或关键帧 Artifact。</small>
+    </section>
   );
 }
 
@@ -120,12 +215,54 @@ export function SearchPage() {
   const [answer, setAnswer] = useState<string | null>(null);
   const [busy, setBusy] = useState<"search" | "chat" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [videoPreview, setVideoPreview] = useState<VideoCitationPreview | null>(null);
+  const [videoPreviewError, setVideoPreviewError] = useState<string | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
 
   const openCitationInObsidian = async (itemId: string) => {
     try {
       const { uri } = await openObsidian(itemId);
       window.location.href = uri;
+    } catch (reason) {
+      setError(messageFor(reason));
+    }
+  };
+
+  const openCitationArtifact = async (
+    artifactId: string,
+    page?: number,
+    options?: { startMs?: number; endMs?: number; keyframeId?: string },
+  ) => {
+    try {
+      await openArtifact(artifactId, page, options);
+    } catch (reason) {
+      setError(messageFor(reason));
+    }
+  };
+
+  const openCitationUrl = (url: string) => {
+    try {
+      openExternalUrl(url);
+    } catch (reason) {
+      setError(messageFor(reason));
+    }
+  };
+
+  const openVideoCitation = async (citation: Citation) => {
+    const artifactId = citation.target.artifact_id;
+    if (!artifactId) {
+      setError("视频证据 Artifact 不可用");
+      return;
+    }
+    setVideoPreview(null);
+    setVideoPreviewError(null);
+    try {
+      const preview = await getVideoCitation(artifactId, {
+        startMs: citation.target.start_ms ?? citation.locator.start_ms,
+        endMs: citation.target.end_ms ?? citation.locator.end_ms,
+        keyframeId: citation.target.keyframe_id,
+      });
+      setVideoPreview(preview);
     } catch (reason) {
       setError(messageFor(reason));
     }
@@ -143,6 +280,8 @@ export function SearchPage() {
     setBusy("search");
     setError(null);
     setAnswer(null);
+    setVideoPreview(null);
+    setVideoPreviewError(null);
     setChatClaims([]);
     setChatCitations([]);
     try {
@@ -170,6 +309,8 @@ export function SearchPage() {
     setBusy("chat");
     setError(null);
     setAnswer(null);
+    setVideoPreview(null);
+    setVideoPreviewError(null);
     setChatClaims([]);
     setChatCitations([]);
     setChatEvidence(null);
@@ -233,6 +374,18 @@ export function SearchPage() {
 
       {error ? <div className="inline-error" role="alert">{error}</div> : null}
 
+      {videoPreview ? (
+        <VideoCitationPanel
+          preview={videoPreview}
+          error={videoPreviewError}
+          onClose={() => {
+            setVideoPreview(null);
+            setVideoPreviewError(null);
+          }}
+          onArtifactError={() => setVideoPreviewError("关键帧 Artifact 不可访问")}
+        />
+      ) : null}
+
       {chatClaims.length > 0 || answer ? (
         <section className="answer-panel">
           <div className="section-heading compact">
@@ -257,6 +410,11 @@ export function SearchPage() {
                 <CitationCard
                   citation={citation}
                   key={citation.citation_id}
+                  onOpenArtifact={(artifactId, page, options) =>
+                    void openCitationArtifact(artifactId, page, options)
+                  }
+                  onOpenVideoCitation={(citation) => void openVideoCitation(citation)}
+                  onOpenUrl={openCitationUrl}
                   onOpenObsidian={(itemId) => void openCitationInObsidian(itemId)}
                 />
               ))}
@@ -279,6 +437,11 @@ export function SearchPage() {
                 <CitationCard
                   citation={result.citation}
                   key={result.citation.citation_id}
+                  onOpenArtifact={(artifactId, page, options) =>
+                    void openCitationArtifact(artifactId, page, options)
+                  }
+                  onOpenVideoCitation={(citation) => void openVideoCitation(citation)}
+                  onOpenUrl={openCitationUrl}
                   onOpenObsidian={(itemId) => void openCitationInObsidian(itemId)}
                 />
               ))}

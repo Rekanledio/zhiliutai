@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TextSourceRequest(BaseModel):
@@ -30,7 +30,24 @@ class ItemPatchRequest(BaseModel):
 
 
 class ReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     approved: bool = True
+    decision: Literal["approve", "reject", "cancel"] | None = None
+
+    def resolved_decision(self) -> Literal["approve", "reject", "cancel"]:
+        if self.decision is not None:
+            return self.decision
+        return "approve" if self.approved else "reject"
+
+
+class PublishRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    decision: Literal["approve", "reject", "cancel"] = "approve"
+
+    def resolved_decision(self) -> Literal["approve", "reject", "cancel"]:
+        return self.decision
 
 
 class ItemResponse(BaseModel):
@@ -39,6 +56,9 @@ class ItemResponse(BaseModel):
     source_type: str
     status: str
     content_hash: str
+    current_content_version_id: str | None = None
+    pending_content_version_id: str | None = None
+    has_pending_review: bool = False
     body: str | None = None
     summary: str | None = None
     suggested_tags: list[str] = []

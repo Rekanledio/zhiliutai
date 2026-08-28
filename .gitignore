@@ -20,6 +20,8 @@ htmlcov/
 # JavaScript dependencies and build output
 node_modules/
 frontend/dist/
+frontend/playwright-report/
+frontend/test-results/
 frontend/.vite/
 *.tsbuildinfo
 coverage/

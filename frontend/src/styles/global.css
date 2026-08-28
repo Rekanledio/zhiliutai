@@ -900,6 +900,47 @@ p {
   box-shadow: 0 0 0 3px rgba(31, 101, 95, 0.08);
 }
 
+.video-capture-fields {
+  display: grid;
+  gap: 11px;
+}
+
+.video-capture-fields label {
+  display: grid;
+  gap: 6px;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.video-capture-fields input:not([type="checkbox"]) {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  outline: none;
+  padding: 10px 12px;
+  color: var(--ink);
+  background: #fffefa;
+  font: inherit;
+  font-size: 12px;
+}
+
+.video-capture-fields input:not([type="checkbox"]):focus {
+  border-color: #9fc6b7;
+  box-shadow: 0 0 0 3px rgba(31, 101, 95, 0.08);
+}
+
+.video-capture-fields .checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.row-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .form-actions {
   display: flex;
   align-items: center;
@@ -994,7 +1035,8 @@ p {
 
 .search-form,
 .answer-panel,
-.search-results {
+.search-results,
+.video-citation-panel {
   border: 1px solid rgba(232, 229, 220, 0.95);
   border-radius: 18px;
   background: rgba(255, 253, 249, 0.9);
@@ -1049,7 +1091,8 @@ p {
 }
 
 .answer-panel,
-.search-results {
+.search-results,
+.video-citation-panel {
   margin-top: 15px;
   padding: 21px 22px;
 }
@@ -1189,6 +1232,65 @@ p {
 
 .citation-open-button {
   padding: 0;
+}
+
+.video-citation-panel {
+  margin-top: 15px;
+  padding: 18px 20px;
+}
+
+.video-citation-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.video-citation-heading h2 {
+  margin-top: 4px;
+  color: var(--ink);
+  font-family: Georgia, "Songti SC", "STSong", serif;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.video-transcript-preview,
+.video-keyframe-preview {
+  margin-top: 14px;
+  padding: 13px;
+  border-radius: 11px;
+  background: var(--teal-wash);
+}
+
+.video-transcript-preview > span {
+  color: var(--teal);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.video-transcript-preview p {
+  margin-top: 7px;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.video-keyframe-preview img {
+  display: block;
+  width: min(100%, 640px);
+  max-height: 360px;
+  margin: 0 auto;
+  object-fit: contain;
+  border-radius: 8px;
+  background: #f4f5ef;
+}
+
+.video-citation-panel > small {
+  display: block;
+  margin-top: 10px;
+  color: #9ba7a1;
+  font-size: 10px;
+  line-height: 1.5;
 }
 
 .locator-status {

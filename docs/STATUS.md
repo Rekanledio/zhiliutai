@@ -1,98 +1,85 @@
 # 项目状态
 
-更新时间：2026-08-27
+更新时间：2026-08-29
 
-## 阶段状态
+## 最终结论
 
-- 阶段 0：**通过**。
-- 阶段 1：**通过**。
-- 阶段 2：**通过自动化与人工闭环验收**。
-- 阶段 3：**通过自动化闭环验收**。
-- 阶段 4：**实现完成，自动化门禁通过**。
-- 下一阶段：阶段 5（视频/多模态），尚未开始。
+- 阶段 0–3：已通过既定自动化和人工闭环验收。
+- 阶段 4：**PASS WITH NON-BLOCKING RISKS**，已完成 Sol 独立复验。
+- 阶段 5（批次 A–F）：**PASS WITH NON-BLOCKING RISKS**，已完成 Sol 最终复验。
+- 阶段 6（批次 A–G）：**PASS WITH NON-BLOCKING RISKS**，已完成 Sol 独立总复验。
+- 本轮最终极小收口仅加固 restore 归档/目标/staging 路径碰撞并统一文档；不新增产品功能、Graph 或 migration。
 
-阶段 1 的验收定义已按 ADR-0011 收口：本地不再要求 Docker Desktop、PostgreSQL、pgvector、Redis 或当前 runner 的真实浏览器。Docker build 和 Playwright E2E 分别是 CI/具备能力环境的门禁，未执行即不标记 passed。
+## 数据所有权与运行边界
 
-## 架构收口
+- 用户确认后的知识正文唯一主来源仍是 Obsidian Markdown。
+- SQLite 保存业务关系、任务、版本、引用、ModelRun、FTS5 和 workflow request 元数据；Artifact 保存原件及可重建产物；Qdrant 仅保存可重建向量，SQLite 的 published/current/非删除关系始终权威。
+- 只有 `IngestionGraph` 与 `QuestionAnswerGraph` 两个 Graph。Graph 只编排普通 application service，不复制采集、发布、索引、RAG、Citation 或 Provider 规则。
+- HITL 保留 `pending_review`/`pending_publish` 边界；证据不足时在调用答案 Provider 前拒答。
+- 服务默认绑定 `127.0.0.1`。自动化只使用临时 SQLite、Qdrant Local、Artifact、Vault、MockTransport、确定性 provider 和受控 MCP memory transport。
 
-- `PostgreSQL + pgvector + Redis + Celery + Docker Compose` 已替换为 `SQLite + SQLite FTS5 + Qdrant Local + Python JobRunner`。
-- `compose.yaml`、旧生产依赖和 PostgreSQL-only migration 已删除；`uv.lock` 已更新。
-- SQLite baseline 创建阶段 2 实际使用的实体和 `chunk_fts`；临时数据库 upgrade/down/up 通过。
-- Dockerfile、`.dockerignore` 与 GitHub Actions 已加入。当前机器没有 Docker，所以 Docker build 只登记为 CI 待执行能力，不登记为本地通过。
-- Health 已切换为 FastAPI、SQLite、Qdrant、Artifact、Obsidian、Watcher、Model Providers 和 FFmpeg。
+## 阶段 4：RAG
 
-## 阶段 2 已实现
+- QueryProcessor、SQLite FTS5、Qdrant Local、RRF、证据门禁、CitationBuilder 和 `QuestionAnswerService` 已接入现有 API/SSE。
+- Qdrant 结果必须回到 SQLite 复核 current、published、非删除和内容哈希；Citation 必须属于当前 ModelRun、ContentVersion、Chunk 和 KnowledgeItem。
+- ModelRun/Citation 使用事务和 mutation lock 保护；固定中文评测每次创建全新的临时检索环境，不依赖随机 UUID 排序。
+- 既有非阻塞风险：没有未经明确协议伪造的生产 reranker HTTP adapter；仅提供可注入 Protocol 和确定性参考实现。
 
-- Text/Markdown 规范化、SHA-256、内容寻址 Artifact、去重和幂等键。
-- SQLite 持久化 JobRunner、JobAttempt、结构化失败、重试和进程重启恢复。
-- OpenAI-compatible Chat/Embedding capability；测试使用确定性 provider。Chat 未配置时保留原文草稿，Embedding 未配置时阻止伪装完成向量发布。
-- 草稿、编辑、审核、发布、软删除和既定 API。
-- 稳定 Frontmatter、受管理 Vault 路径、原子 Markdown 写入和 Obsidian 深链。
-- Chunk、SQLite FTS5、Qdrant payload 与发布后 searchable index。
-- watcher/rescan、内容哈希、外部修改新版本、重命名、missing/conflict 和重索引。
-- 多次快速保存保留完整 `ContentVersion` 历史，但 Chunk、FTS5 与 Qdrant 只保留当前发布版本；瞬态不完整 Markdown 延后处理并回退到最近有效版本。
-- Inbox、Knowledge、Jobs 页面；前端 Request ID、统一 API 错误、超时和 AbortController 取消。
+## 阶段 5：视频
 
-## 阶段 3 已实现
+- 批次 A–F 已交付严格毫秒时间轴、0004 Artifact 生命周期与 pending/current 隔离、安全 URL/下载边界、字幕优先、受控 FFmpeg/ASR、条件视觉、视频 Citation、补偿发布和清理。
+- 视频 Graph 接线继续复用 VideoService、Stage2Service、JobRunner、Artifact、Obsidian 和 IndexService；没有把视频结果变成第二正文主库。
+- 阶段 5 三项既有风险继续有效：真实 yt-dlp/extractor/FFmpeg/网站和模型互操作未在本机验证；HTTPS 隧道不能观察明文 redirect 或精确重定向次数；跨 Vault、SQLite、Artifact、Qdrant 的进程级崩溃仍不具备物理事务，只能依赖补偿、校验和重建。
 
-- 统一 SourceBlock/ParsedSource 管线接入 PDF、DOCX 和无需登录的静态 HTML。
-- PDF 保留页码，DOCX 保留标题层级和表格行定位，网页保留最终 URL 与标题层级。
-- 文件原始 Artifact、网页 URL 请求 Artifact 与 HTML 快照 Artifact 均内容寻址保存。
-- URL scheme、凭据、DNS 私网/环回、重定向、响应类型、大小和超时边界已实现。
-- ContentVersion.source_metadata_json 保存可重建来源 segments；发布后的 Chunk、
-  SQLite FTS5 和 Qdrant payload 复用结构化 locator。
-- 阶段 3 仍复用现有 JobRunner、草稿/审核/发布、Vault 和当前版本索引收敛，
-  未引入 RAG Chat、视频、Agent 或 MCP。
+## 阶段 6：Graph、MCP 与恢复
 
-## 阶段 4 已实现
+- 批次 A 建立严格 Pydantic/TypedDict/Literal 契约、脱敏 state、独立 AsyncSqliteSaver 生命周期、HITL interrupt/resume 和失败恢复。
+- 批次 B 的生产 IngestionGraph 使用系统 job UUID，薄适配既有 Stage2/Video/JobRunner；review/publish reject/cancel 会清除 pending 候选并持久化为可恢复的 failed 状态，已发布 current 不被删除。
+- 批次 C 的 QA request 以脱敏 query hash、mode、limit、rewrite、source_types 形成 fingerprint；不同身份在检索/Provider 前以 `idempotency_conflict` fail closed，相同身份的完整执行受 mutation lock 保护并复用 ModelRun/Citation。对应真实业务 migration 为 0005。
+- 批次 D/E 仅提供五个 MCP 工具和显式 profile 的受控 Client；输入 strict/`extra=forbid`，能力取交集，错误和结果递归脱敏，不启用 Agent 自动工具循环。Collection 关系使用最小 0006 migration。
+- 批次 F 使用固定归档、manifest/hash、离线 restore 和显式 CLI。restore 默认不覆盖，业务/独立 checkpoint 主文件及 `-wal/-shm` sidecar 一并安装、清理、回滚；Qdrant 由已验证 Markdown/Artifact/SQLite 关系重建。
+- 批次 G 已有合成端到端闭环、前端 Playwright 代码、E2E typecheck、CI 门禁和失败产物配置；本机浏览器 runner 的真实执行仍按风险登记。
 
-- QueryProcessor、SQLite FTS5 与 Qdrant Local 双通道检索；Qdrant 只提供候选，
-  所有结果回到 SQLite 复核 published、未软删除和 current_content_version_id。
-- 加权 RRF、去重、当前版本校验、证据门禁和可选 reranker 接口；reranker 未配置或
-  失败时保留 RRF 结果并明确标记降级。
-- POST /api/search 返回结构化结果、诊断、证据状态和安全 citation；支持 PDF 页码、
-  DOCX 标题/段落/表格行、网页最终 URL 与 Obsidian 回退定位，并提供受控 Artifact 读取。
-- 独立 RagChatProvider、QuestionAnswerService 和 POST /api/chat/stream；证据不足
-  时拒答且不调用答案 Provider，每个结构化 claim 必须绑定本次合法 citation。
-- ModelRun 审计输入/输出/Token/耗时，Citation 保存内容哈希、版本快照、locator、
-  target 与检索分数；新增 migration 0003_rag_audit。
-- SearchPage 展示搜索结果、SSE 回答、证据状态和引用卡片；固定中文离线评测集仅使用
-  合成 chunk ID，不宣称真实线上召回率。
+## 本轮极小收口
 
-人工闭环已在专用测试 Vault 验证：Markdown 提交、真实 DeepSeek 草稿、审核、发布、Obsidian 打开、连续多次外部修改、watcher 重扫与 FastEmbed/Qdrant 重索引均成功。最终只读核验为 SQLite Chunk 1 个版本、FTS5 1 个版本、Qdrant 1 个当前版本点，三者与 `KnowledgeItem.current_content_version_id` 一致。
+- `BackupRestoreService.restore_backup` 现在拒绝归档与业务/ checkpoint 主文件或任一 sidecar 重叠，拒绝归档位于 Artifact/Vault 目标内，并在创建实际 staging 后拒绝任何目标与 staging 的父子碰撞。
+- 新增定向测试覆盖 archive==database、archive==checkpoint `-wal`、归档位于 Artifact/Vault、强制 staging 碰撞以及独立目标正常恢复。
+- `AGENTS.md`、`README.md`、本文件、`docs/ARCHITECTURE.md`、`docs/TESTING.md` 和 `docs/DECISIONS.md` 均统一记录最终结论为 **PASS WITH NON-BLOCKING RISKS**；未修改 `docs/PROJECT.md`。
 
-## 当前验证结果
+## 验证证据
 
 ~~~text
 uv sync --project backend --locked                    passed
 uv lock --project backend --check                     passed
 uv run --directory backend ruff check app tests       passed
-uv run --directory backend pytest -q                  52 passed
-uv run --directory backend pytest -q tests/test_source_pipeline.py  5 passed
-temporary SQLite alembic up/down/up                    passed
-npm --prefix frontend ci --ignore-scripts ...         passed
+uv run --directory backend pytest -q tests/test_stage6_backup_restore.py tests/test_stage6_backup_cli.py
+                                                        10 passed in 2.41s
+uv run --directory backend pytest -q                  181 passed in 45.40s，无 warning
+temporary SQLite alembic upgrade -> downgrade -> upgrade
+                                                        passed（0001–0006）
+npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
+                                                        passed；whatwg-encoding 弃用警告
 npm --prefix frontend run typecheck                   passed
-npm --prefix frontend run test                        10 passed
+npm --prefix frontend run test                        20 passed
 npm --prefix frontend run build                       passed
-FastAPI 127.0.0.1 runtime + GET /api/health            passed
-Vite 127.0.0.1 runtime                                passed
-manual Stage 2 dedicated-Vault workflow               passed
+npm --prefix frontend run e2e:typecheck               passed
+npm --prefix frontend run e2e                         未完成：本机 runner 启动后超过 45 秒无结果，已中断
+git -c safe.directory=D:/Work/zhiliutai -C D:/Work/zhiliutai diff --check
+                                                        passed
 ~~~
 
-自动化测试全部使用临时 SQLite、Qdrant、Artifact 与 Vault；未使用真实个人 Vault 或真实 API Key。人工验收使用专用测试 Vault 和仅保存在本机 `.env` 的 provider 配置。
+后端全量、MCP、QA、Ingestion、restore/CLI、视频和迁移专项均使用临时数据或确定性 fake；没有访问真实 Vault、数据库卷、Artifact、网页、视频、模型、API key 或外部 MCP Server。
+
+## 非阻塞风险与下一步
+
+- 本机 Playwright runner 挂起，需在 CI 或浏览器能力正常的环境执行并确认；未将其写成通过。
+- 真实 extractor、yt-dlp、FFmpeg、ASR/Vision/OCR、模型、网页和外部 MCP 互操作未验证；Docker build 也只由 CI/具备 Docker 的环境承担。
+- SQLite、Artifact、Vault、Qdrant 之间不具备跨存储物理事务；恢复后必须显式 rebuild，运行期依赖补偿和权威关系复核。
+- 阶段 4 的 reranker 协议风险和阶段 5 的 HTTPS/真实视频互操作风险继续有效。
+- 下一步仅为 Sol 对本次路径加固和文档收口做快速复验；未宣布无风险，也未开始阶段 7。
 
 ## Git 与数据边界
 
-- `.env`、SQLite、Qdrant、Artifact、Vault、`node_modules`、虚拟环境和构建缓存均被忽略。
-- 本次阶段 4 修改保留在当前工作树中，按约定尚未 commit/push；未修改全局 Git 配置。
-
-## 真实剩余项
-
-- environment limitation：本机没有 Docker，未本地执行 `docker build`；GitHub Actions 已提供对应 gate。
-- environment limitation：当前浏览器 runner 曾报 `trusted Node process exited unexpectedly; kernel reset`；automated component verification passed，real browser E2E pending Playwright/browser-capable environment。
-- future phase：FFmpeg 当前不可用，阶段 5 视频功能前再验证，不自行安装。
-- future phase：视频、ASR、Vision、FFmpeg、完整 LangGraph、Agent、MCP Server/Client
-  仍按 PROJECT.md 后续阶段实施；阶段 4 只提供可编排的普通 RAG service。
-- known risk：当前没有接入生产 reranker HTTP adapter，也未在没有明确协议的情况下伪造；
-  只提供可注入 Protocol 和本地确定性参考实现。
-- blocking：无。
+- 当前分支为 `main`；HEAD 与 `origin/main` 均为 `0804e2b3322e2f22ce09fad817984fbb65693271`。
+- 当前阶段 4/5/6 累计改动保持未提交；未 commit、未 push、未 reset、未 restore、未修改全局 Git 配置。
+- `.env`、SQLite、Qdrant、Artifact、Vault、node_modules、虚拟环境和构建缓存均不纳入 Git。

@@ -1,27 +1,43 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.workflows.contracts import canonical_uuid
 
 
-SourceType = Literal["text", "markdown", "pdf", "docx", "webpage"]
+SourceType = Literal["text", "markdown", "pdf", "docx", "webpage", "video"]
 
 
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=2_000)
     limit: int = Field(default=6, ge=1, le=20)
-    rewrite: Literal["auto", "off"] = "off"
     source_types: list[SourceType] | None = Field(default=None, max_length=5)
 
     model_config = ConfigDict(extra="forbid")
 
 
 class ChatRequest(SearchRequest):
-    pass
+    rewrite: Literal["auto", "off"] = "off"
+    request_id: str | None = None
+
+    @field_validator("request_id")
+    @classmethod
+    def _canonical_request_id(cls, value: str | None) -> str | None:
+        return None if value is None else canonical_uuid(value)
 
 
 class CitationLocator(BaseModel):
-    kind: Literal["pdf", "docx", "webpage", "obsidian", "none"]
+    kind: Literal[
+        "pdf",
+        "docx",
+        "webpage",
+        "obsidian",
+        "video",
+        "video_chapter",
+        "video_keyframe",
+        "none",
+    ]
     page: int | None = Field(default=None, ge=1)
     page_label: str | None = None
     element: str | None = None
@@ -32,6 +48,11 @@ class CitationLocator(BaseModel):
     row: int | None = Field(default=None, ge=1)
     url: str | None = None
     path: str | None = None
+    start_ms: int | None = Field(default=None, ge=0)
+    end_ms: int | None = Field(default=None, ge=1)
+    language: str | None = Field(default=None, min_length=1, max_length=32)
+    event_type: Literal["scene", "slide", "code", "ui", "speaker", "other"] | None = None
+    keyframe_ids: list[str] | None = Field(default=None, max_length=64)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -42,6 +63,9 @@ class CitationTarget(BaseModel):
     item_id: str | None = None
     page: int | None = Field(default=None, ge=1)
     url: str | None = None
+    start_ms: int | None = Field(default=None, ge=0)
+    end_ms: int | None = Field(default=None, ge=1)
+    keyframe_id: str | None = Field(default=None, min_length=1, max_length=200)
 
     model_config = ConfigDict(extra="forbid")
 

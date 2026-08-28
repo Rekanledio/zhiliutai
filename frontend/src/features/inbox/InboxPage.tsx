@@ -8,6 +8,7 @@ import {
   getJob,
   publishItem,
   reviewItem,
+  submitVideo,
   submitText,
 } from "../../services/api";
 
@@ -18,6 +19,11 @@ function messageFor(error: unknown): string {
 export function InboxPage({ onChanged }: { onChanged: () => void }) {
   const [content, setContent] = useState("");
   const [sourceType, setSourceType] = useState<"text" | "markdown">("text");
+  const [captureMode, setCaptureMode] = useState<"text" | "markdown" | "video">("text");
+  const [videoUrl, setVideoUrl] = useState("");
+  const [videoTitle, setVideoTitle] = useState("");
+  const [videoLanguage, setVideoLanguage] = useState("");
+  const [videoVision, setVideoVision] = useState(false);
   const [items, setItems] = useState<KnowledgeItem[]>([]);
   const [busy, setBusy] = useState(false);
   const [jobState, setJobState] = useState<string | null>(null);
@@ -26,7 +32,12 @@ export function InboxPage({ onChanged }: { onChanged: () => void }) {
 
   const loadItems = useCallback(async (signal?: AbortSignal) => {
     const next = await getItems(undefined, signal);
-    setItems(next.filter((item) => ["pending_review", "reviewed"].includes(item.status)));
+    setItems(
+      next.filter(
+        (item) =>
+          ["pending_review", "reviewed"].includes(item.status) || item.has_pending_review,
+      ),
+    );
   }, []);
 
   useEffect(() => {
@@ -62,8 +73,8 @@ export function InboxPage({ onChanged }: { onChanged: () => void }) {
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!content.trim()) {
-      setError("请输入文本或 Markdown");
+    if (captureMode === "video" ? !videoUrl.trim() : !content.trim()) {
+      setError(captureMode === "video" ? "请输入视频 URL" : "请输入文本或 Markdown");
       return;
     }
     controllerRef.current?.abort();
@@ -73,12 +84,23 @@ export function InboxPage({ onChanged }: { onChanged: () => void }) {
     setError(null);
     setJobState("queued");
     try {
-      const submitted = await submitText(content, sourceType, controller.signal);
+      const submitted =
+        captureMode === "video"
+          ? await submitVideo(videoUrl, {
+              title: videoTitle,
+              language: videoLanguage,
+              enableVision: videoVision,
+              signal: controller.signal,
+            })
+          : await submitText(content, sourceType, controller.signal);
       if (!submitted.deduplicated) {
         await pollJob(submitted.job_id, controller.signal);
       }
       await loadItems(controller.signal);
       setContent("");
+      setVideoUrl("");
+      setVideoTitle("");
+      setVideoLanguage("");
       onChanged();
     } catch (reason) {
       setError(messageFor(reason));
@@ -99,7 +121,7 @@ export function InboxPage({ onChanged }: { onChanged: () => void }) {
       setItems((current) =>
         current
           .map((entry) => (entry.id === detail.id ? detail : entry))
-          .filter((entry) => entry.status !== "published"),
+          .filter((entry) => entry.status !== "published" || entry.has_pending_review),
       );
       onChanged();
     } catch (reason) {
@@ -111,34 +133,85 @@ export function InboxPage({ onChanged }: { onChanged: () => void }) {
     <section className="stage-page inbox-page">
       <div className="stage-heading">
         <div>
-          <span className="eyebrow">Text / Markdown</span>
+          <span className="eyebrow">Text / Markdown / Video</span>
           <h1>收件箱</h1>
-          <p>输入先形成草稿，经你审核后才写入 Obsidian。</p>
+          <p>输入先形成草稿，经你审核后才写入 Obsidian；视频先采集字幕，未确认内容不会进入索引。</p>
         </div>
         <span className="local-badge">本机持久化任务</span>
       </div>
       <form className="capture-form" onSubmit={(event) => void submit(event)}>
-        <div className="format-switch" aria-label="内容格式">
-          {(["text", "markdown"] as const).map((format) => (
+          <div className="format-switch" aria-label="内容格式">
             <button
-              className={sourceType === format ? "is-selected" : ""}
-              key={format}
+              className={captureMode === "video" ? "is-selected" : ""}
               type="button"
-              onClick={() => setSourceType(format)}
+              onClick={() => setCaptureMode("video")}
+            >
+              视频
+            </button>
+            {(["text", "markdown"] as const).map((format) => (
+              <button
+                className={captureMode === format ? "is-selected" : ""}
+                key={format}
+                type="button"
+                onClick={() => {
+                  setCaptureMode(format);
+                  setSourceType(format);
+                }}
             >
               {format === "text" ? "纯文本" : "Markdown"}
             </button>
           ))}
         </div>
-        <textarea
-          aria-label="知识内容"
-          value={content}
-          onChange={(event) => setContent(event.target.value)}
-          placeholder="粘贴一段想法、摘录或 Markdown…"
-          rows={10}
-        />
+        {captureMode === "video" ? (
+          <div className="video-capture-fields">
+            <label>
+              视频 URL
+              <input
+                aria-label="视频 URL"
+                type="url"
+                value={videoUrl}
+                onChange={(event) => setVideoUrl(event.target.value)}
+                placeholder="https://…"
+              />
+            </label>
+            <label>
+              标题（可选）
+              <input
+                aria-label="视频标题"
+                value={videoTitle}
+                onChange={(event) => setVideoTitle(event.target.value)}
+              />
+            </label>
+            <label>
+              语言（可选）
+              <input
+                aria-label="字幕语言"
+                value={videoLanguage}
+                onChange={(event) => setVideoLanguage(event.target.value)}
+                placeholder="zh-Hans"
+              />
+            </label>
+            <label className="checkbox-row">
+              <input
+                aria-label="启用条件视觉处理"
+                type="checkbox"
+                checked={videoVision}
+                onChange={(event) => setVideoVision(event.target.checked)}
+              />
+              对幻灯片/教程尝试条件视觉处理
+            </label>
+          </div>
+        ) : (
+          <textarea
+            aria-label="知识内容"
+            value={content}
+            onChange={(event) => setContent(event.target.value)}
+            placeholder="粘贴一段想法、摘录或 Markdown…"
+            rows={10}
+          />
+        )}
         <div className="form-actions">
-          <span>{jobState ? "任务状态：" + jobState : "AI 未配置时会保留规范化原文草稿"}</span>
+          <span>{jobState ? "任务状态：" + jobState : "视频采集只接受 URL，不读取本地路径或浏览器凭据"}</span>
           {busy ? (
             <button
               className="ghost-button"
@@ -170,9 +243,20 @@ export function InboxPage({ onChanged }: { onChanged: () => void }) {
               <button
                 className={item.status === "reviewed" ? "primary-button" : "ghost-button"}
                 type="button"
-                onClick={() => void act(item, item.status === "reviewed" ? "publish" : "review")}
+                onClick={() =>
+                  void act(
+                    item,
+                    item.status === "reviewed" ||
+                      (item.status === "published" && Boolean(item.has_pending_review))
+                      ? "publish"
+                      : "review",
+                  )
+                }
               >
-                {item.status === "reviewed" ? "发布到 Obsidian" : "审核通过"}
+                {item.status === "reviewed" ||
+                (item.status === "published" && Boolean(item.has_pending_review))
+                  ? "发布到 Obsidian"
+                  : "审核通过"}
               </button>
             </article>
           ))

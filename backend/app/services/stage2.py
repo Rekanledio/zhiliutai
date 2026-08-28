@@ -1,8 +1,10 @@
 import asyncio
 import json
+import structlog
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 from sqlalchemy import func, select
@@ -20,12 +22,27 @@ from app.db.models import (
 from app.ingestion.fetcher import SourceFetcher, UnsafeUrlError
 from app.ingestion.parsers import parse_source
 from app.ingestion.types import ParsedSource, SourceBlock
-from app.obsidian.markdown import ObsidianVault, parse_note, render_note
+from app.obsidian.markdown import ObsidianVault, StagedWrite, parse_note, render_note
 from app.providers.models import DraftProvider, EmbeddingProvider
+from app.providers.video import (
+    ASRProvider,
+    AudioExtractor,
+    FfmpegAudioExtractor,
+    OCRProvider,
+    SceneDetector,
+    VideoSourceProvider,
+    VisionProvider,
+    YtDlpDownloader,
+    YtDlpVideoSourceProvider,
+)
 from app.services.artifacts import ArtifactStore, StoredArtifact
 from app.services.content import content_hash, default_title, normalize_content
 from app.services.indexing import IndexService
+from app.services.video import VideoService
 from app.services.vector_store import QdrantLocalStore
+
+
+logger = structlog.get_logger("stage2")
 
 
 class Stage2Service:
@@ -35,12 +52,18 @@ class Stage2Service:
         session_factory: async_sessionmaker[AsyncSession],
         draft_provider: DraftProvider,
         embedding_provider: EmbeddingProvider | None,
+        video_provider: VideoSourceProvider | None = None,
+        asr_provider: ASRProvider | None = None,
+        audio_extractor: AudioExtractor | None = None,
+        scene_detector: SceneDetector | None = None,
+        vision_provider: VisionProvider | None = None,
+        ocr_provider: OCRProvider | None = None,
     ) -> None:
         self.settings = settings
         self.session_factory = session_factory
         self.artifacts = ArtifactStore(settings.artifact_root)
         self.draft_provider = draft_provider
-        self._mutation_lock = asyncio.Lock()
+        self.mutation_lock = asyncio.Lock()
         self._initial_vector_reconciliation_complete = False
         self.embedding_provider = embedding_provider
         self.vector_store = QdrantLocalStore(settings.qdrant_path, settings.embedding_dimensions)
@@ -49,6 +72,51 @@ class Stage2Service:
             timeout=settings.source_fetch_timeout,
             max_redirects=settings.source_max_redirects,
         )
+        resolved_video_provider = video_provider or YtDlpVideoSourceProvider(
+            YtDlpDownloader(
+                settings.artifact_root,
+                executable=settings.video_ytdlp_executable,
+                url_validator=self.source_fetcher.validate,
+            )
+        )
+        self.video_service = VideoService(
+            settings,
+            session_factory,
+            self.artifacts,
+            video_provider=resolved_video_provider,
+            asr_provider=asr_provider,
+            audio_extractor=audio_extractor
+            if audio_extractor is not None
+            else FfmpegAudioExtractor(
+                settings.artifact_root,
+                executable=settings.video_ffmpeg_executable,
+            ),
+            scene_detector=scene_detector,
+            vision_provider=vision_provider,
+            ocr_provider=ocr_provider,
+            url_validator=self.source_fetcher.validate,
+        )
+
+    async def submit_video(
+        self,
+        url: str,
+        title: str | None,
+        language: str | None,
+        idempotency_key: str | None,
+        enable_vision: bool,
+    ) -> tuple[KnowledgeItem, ProcessingJob, bool]:
+        return await self.video_service.submit_video(
+            url, title, language, idempotency_key, enable_vision
+        )
+
+    async def process_video(self, job: ProcessingJob) -> dict[str, object]:
+        return await self.video_service.process_video(job)
+
+    async def reprocess_video(self, item_id: str) -> tuple[KnowledgeItem, ProcessingJob]:
+        return await self.video_service.reprocess(item_id)
+
+    async def cleanup_video_artifacts(self) -> dict[str, int]:
+        return await self.video_service.cleanup_due()
 
     def vault(self) -> ObsidianVault:
         if self.settings.vault_root is None:
@@ -392,38 +460,50 @@ class Stage2Service:
         title_provided = bool(payload.get("title_provided"))
         draft_title = item.title if title_provided else parsed.title
         draft = await self.draft_provider.create_draft(draft_title, parsed.body)
-        async with self.session_factory() as session, session.begin():
-            item = await session.get(KnowledgeItem, item.id)
-            if item is None:
-                raise RuntimeError("知识条目不存在")
-            next_no = await self._next_version_no(session, item.id)
-            version = ContentVersion(
-                knowledge_item_id=item.id,
-                version_no=next_no,
-                source_kind="draft",
-                title=draft.title[:300],
-                body=normalize_content(draft.body),
-                content_hash=content_hash(draft.body),
-                summary=draft.summary,
-                suggested_tags_json=json.dumps(draft.suggested_tags, ensure_ascii=False),
-                prompt_version=draft.prompt_version,
-                source_metadata_json=json.dumps(parsed.metadata, ensure_ascii=False),
-            )
-            session.add(version)
-            await session.flush()
-            if not title_provided:
-                item.title = version.title
-            item.status = "pending_review"
-            item.current_content_version_id = version.id
-            item.updated_at = datetime.now(timezone.utc)
-            result: dict[str, object] = {
-                "item_id": item.id,
-                "content_version_id": version.id,
-                "source_type": source_type,
-            }
-            if snapshot is not None:
-                result["snapshot_artifact_id"] = snapshot.id
-            return result
+        async with self.mutation_lock:
+            async with self.session_factory() as session, session.begin():
+                item = await session.get(KnowledgeItem, item.id)
+                if item is None:
+                    raise RuntimeError("知识条目不存在")
+                next_no = await self._next_version_no(session, item.id)
+                version = ContentVersion(
+                    knowledge_item_id=item.id,
+                    version_no=next_no,
+                    source_kind="draft",
+                    title=draft.title[:300],
+                    body=normalize_content(draft.body),
+                    content_hash=content_hash(draft.body),
+                    summary=draft.summary,
+                    suggested_tags_json=json.dumps(draft.suggested_tags, ensure_ascii=False),
+                    prompt_version=draft.prompt_version,
+                    source_metadata_json=json.dumps(
+                        {
+                            **parsed.metadata,
+                            "source_artifact_id": artifact.id,
+                            **(
+                                {"snapshot_artifact_id": snapshot.id}
+                                if snapshot is not None
+                                else {}
+                            ),
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+                session.add(version)
+                await session.flush()
+                if not title_provided:
+                    item.title = version.title
+                item.status = "pending_review"
+                item.current_content_version_id = version.id
+                item.updated_at = datetime.now(timezone.utc)
+                result: dict[str, object] = {
+                    "item_id": item.id,
+                    "content_version_id": version.id,
+                    "source_type": source_type,
+                }
+                if snapshot is not None:
+                    result["snapshot_artifact_id"] = snapshot.id
+                return result
 
     async def _next_version_no(self, session: AsyncSession, item_id: str) -> int:
         result = await session.execute(
@@ -436,12 +516,40 @@ class Stage2Service:
     async def review(self, item_id: str) -> KnowledgeItem:
         async with self.session_factory() as session, session.begin():
             item = await self._item(session, item_id)
-            if item.status != "pending_review":
+            if item.status == "published" and item.pending_content_version_id is None:
                 raise ApplicationError(409, "invalid_item_state", "条目不在待审核状态")
-            item.status = "reviewed"
+            if item.status not in {"pending_review", "published"}:
+                raise ApplicationError(409, "invalid_item_state", "条目不在待审核状态")
+            if item.status != "published":
+                item.status = "reviewed"
             item.updated_at = datetime.now(timezone.utc)
             await session.flush()
             return item
+
+    async def abandon_pending_decision(
+        self, item_id: str, decision: Literal["reject", "cancel"]
+    ) -> KnowledgeItem:
+        """Close an unapproved candidate without changing user-owned content.
+
+        A rejected or cancelled intake is kept as a failed, non-pending item so
+        the workflow/job and item state agree.  A published item keeps its
+        authoritative current version while discarding only the unapproved
+        pending candidate.  Reprocess is the explicit path for a new review
+        cycle.
+        """
+        if decision not in {"reject", "cancel"}:
+            raise ApplicationError(400, "invalid_review_decision", "审核决策无效")
+        async with self.mutation_lock:
+            async with self.session_factory() as session, session.begin():
+                item = await self._item(session, item_id)
+                if item.status not in {"pending_review", "reviewed", "published"}:
+                    raise ApplicationError(409, "invalid_item_state", "条目不在可结束状态")
+                item.pending_content_version_id = None
+                if item.status != "published":
+                    item.status = "failed"
+                item.updated_at = datetime.now(timezone.utc)
+                await session.flush()
+                return item
 
     async def patch_item(
         self,
@@ -450,7 +558,7 @@ class Stage2Service:
         body: str | None,
         expected_content_hash: str | None,
     ) -> KnowledgeItem:
-        async with self._mutation_lock:
+        async with self.mutation_lock:
             item = await self._patch_item(item_id, title, body, expected_content_hash)
             if item.status == "published" and item.current_content_version_id:
                 self.vector_store.delete_item_except_version(
@@ -467,11 +575,11 @@ class Stage2Service:
     ) -> KnowledgeItem:
         async with self.session_factory() as session, session.begin():
             item = await self._item(session, item_id)
-            if item.status == "published":
+            if item.status == "published" and item.pending_content_version_id is None:
                 return await self._patch_published(
                     session, item, title, body, expected_content_hash
                 )
-            if item.status not in {"pending_review", "reviewed"}:
+            if item.status not in {"pending_review", "reviewed", "published"}:
                 raise ApplicationError(409, "invalid_item_state", "当前状态不可编辑")
             current = await self._version(session, item)
             next_body = normalize_content(body if body is not None else current.body)
@@ -489,10 +597,16 @@ class Stage2Service:
             )
             session.add(version)
             await session.flush()
-            item.title = version.title
-            item.content_hash = version.content_hash
-            item.current_content_version_id = version.id
-            item.status = "pending_review"
+            pending_target = item.source_type == "video" or item.pending_content_version_id is not None
+            if item.current_content_version_id is None:
+                item.title = version.title
+            if pending_target:
+                item.pending_content_version_id = version.id
+            else:
+                item.current_content_version_id = version.id
+                item.content_hash = version.content_hash
+            if item.current_content_version_id is None:
+                item.status = "pending_review"
             item.updated_at = datetime.now(timezone.utc)
             return item
 
@@ -553,12 +667,21 @@ class Stage2Service:
         return item
 
     async def publish(self, item_id: str) -> KnowledgeItem:
-        async with self._mutation_lock:
+        async with self.mutation_lock:
             item = await self._publish(item_id)
             if item.current_content_version_id:
-                self.vector_store.delete_item_except_version(
-                    item.id, item.current_content_version_id
-                )
+                try:
+                    self.vector_store.delete_item_except_version(
+                        item.id, item.current_content_version_id
+                    )
+                except Exception as error:
+                    # SQLite current_content_version_id is authoritative.  A
+                    # stale vector can never become answer evidence, and its
+                    # cleanup can be retried on a later reconciliation.
+                    logger.error(
+                        "published_vector_cleanup_failed",
+                        error_type=type(error).__name__,
+                    )
             return item
 
     async def _publish(self, item_id: str) -> KnowledgeItem:
@@ -569,59 +692,122 @@ class Stage2Service:
                 "发布前必须配置 Embedding capability，以完成 Qdrant 索引",
             )
         vault = self.vault()
-        async with self.session_factory() as session, session.begin():
-            item = await self._item(session, item_id)
-            if item.status == "published":
-                return item
-            if item.status != "reviewed":
-                raise ApplicationError(409, "invalid_item_state", "条目必须先审核再发布")
-            current = await self._version(session, item)
-            binding_result = await session.execute(
-                select(NoteBinding).where(NoteBinding.knowledge_item_id == item.id)
-            )
-            binding = binding_result.scalar_one_or_none()
-            relative_path = (
-                binding.relative_path
-                if binding is not None
-                else vault.publish_path(item.title, item.id)
-            )
-            raw = render_note(
-                zhiliu_id=item.id,
-                source_type=item.source_type,
-                title=current.title,
-                body=current.body,
-                status="reviewed",
-                created_at=item.created_at,
-                updated_at=datetime.now(timezone.utc),
-                tags=json.loads(current.suggested_tags_json),
-                source_url=self._source_url(current.source_metadata_json),
-            )
-            vault.atomic_write(relative_path, raw)
-            written = vault.read(relative_path)
-            if content_hash(written.body) != content_hash(current.body):
-                raise OSError("Vault 落盘校验失败")
-            if binding is None:
-                binding = NoteBinding(
-                    knowledge_item_id=item.id,
-                    zhiliu_id=item.id,
-                    relative_path=relative_path,
-                    content_hash=content_hash(written.body),
-                    last_written_hash=content_hash(written.body),
-                    sync_state="synced",
-                    last_synced_at=datetime.now(timezone.utc),
+        staged: StagedWrite | None = None
+        old_raw: bytes | None = None
+        old_exists = False
+        vault_swap_attempted = False
+        candidate_version_id: str | None = None
+        try:
+            async with self.session_factory() as session, session.begin():
+                item = await self._item(session, item_id)
+                if item.status == "published" and item.pending_content_version_id is None:
+                    return item
+                if item.status not in {"reviewed", "published"}:
+                    raise ApplicationError(409, "invalid_item_state", "条目必须先审核再发布")
+                current = await self._version(session, item)
+                binding_result = await session.execute(
+                    select(NoteBinding).where(NoteBinding.knowledge_item_id == item.id)
                 )
-                session.add(binding)
-                await session.flush()
-            await self._apply_vault_version(
-                session,
-                item,
-                binding,
-                current.title,
-                written.body,
-                relative_path,
-                source_metadata_json=current.source_metadata_json,
-            )
-        return item
+                binding = binding_result.scalar_one_or_none()
+                relative_path = (
+                    binding.relative_path
+                    if binding is not None
+                    else vault.publish_path(item.title, item.id)
+                )
+                raw = render_note(
+                    zhiliu_id=item.id,
+                    source_type=item.source_type,
+                    title=current.title,
+                    body=current.body,
+                    status="reviewed",
+                    created_at=item.created_at,
+                    updated_at=datetime.now(timezone.utc),
+                    tags=json.loads(current.suggested_tags_json),
+                    source_url=self._source_url(current.source_metadata_json),
+                )
+
+                target = vault.resolve(relative_path)
+                if target.exists() and not target.is_file():
+                    raise OSError("Vault 目标不可写")
+                old_exists = target.is_file()
+                if old_exists:
+                    old_raw = target.read_bytes()
+
+                # The candidate is first written to a same-directory temp file.
+                # It is not visible to Obsidian or readers while indexes are
+                # prepared inside the SQLite transaction.
+                staged = vault.stage_write(relative_path, raw)
+                version = await self._new_vault_version(
+                    session,
+                    item,
+                    current.title,
+                    current.body,
+                    relative_path,
+                    source_metadata_json=current.source_metadata_json,
+                    summary=current.summary,
+                    suggested_tags_json=current.suggested_tags_json,
+                    prompt_version=current.prompt_version,
+                )
+                candidate_version_id = version.id
+                index = IndexService(self.vector_store, self.embedding_provider)
+                prepared = await index.prepare_version(item, version, relative_path)
+                await index.apply_prepared(session, item, version, prepared)
+
+                # Only after embedding, Qdrant upsert and SQLite chunk/FTS
+                # changes have prepared successfully does the final file swap.
+                # Mark the swap as attempted before calling it.  A filesystem
+                # adapter can report an error after os.replace has completed;
+                # compensation must cover that ambiguous outcome too.
+                vault_swap_attempted = True
+                vault.commit_staged(staged)
+                written = vault.read(relative_path)
+                if content_hash(written.body) != content_hash(current.body):
+                    raise OSError("Vault 落盘校验失败")
+                digest = content_hash(written.body)
+                if binding is None:
+                    binding = NoteBinding(
+                        knowledge_item_id=item.id,
+                        zhiliu_id=item.id,
+                        relative_path=relative_path,
+                        content_hash=digest,
+                        last_written_hash=digest,
+                        sync_state="synced",
+                        last_synced_at=datetime.now(timezone.utc),
+                    )
+                    session.add(binding)
+                    await session.flush()
+                self._activate_vault_version(item, binding, version, relative_path, digest)
+                item.pending_content_version_id = None
+            return item
+        except BaseException:
+            if staged is not None:
+                try:
+                    vault.discard_staged(staged)
+                except (OSError, ValueError):
+                    logger.error(
+                        "publish_staged_vault_cleanup_failed",
+                        error_type="staged_cleanup",
+                    )
+            if vault_swap_attempted:
+                try:
+                    if old_exists:
+                        if old_raw is None:
+                            raise OSError("Vault 旧正文快照缺失")
+                        restore = vault.stage_bytes(relative_path, old_raw)
+                        try:
+                            vault.commit_staged(restore)
+                        finally:
+                            vault.discard_staged(restore)
+                    else:
+                        vault.remove(relative_path)
+                except (OSError, ValueError) as error:
+                    logger.error(
+                        "publish_vault_compensation_failed",
+                        error_type=type(error).__name__,
+                    )
+            if candidate_version_id is not None:
+                self._discard_candidate_vectors(candidate_version_id)
+            raise
 
     @staticmethod
     def _source_url(source_metadata_json: str) -> str | None:
@@ -667,22 +853,58 @@ class Stage2Service:
     ) -> ContentVersion:
         if self.embedding_provider is None:
             raise ApplicationError(409, "embedding_not_configured", "Embedding capability 未配置")
+        version = await self._new_vault_version(
+            session,
+            item,
+            title,
+            body,
+            relative_path,
+            source_metadata_json=source_metadata_json,
+        )
+        index = IndexService(self.vector_store, self.embedding_provider)
+        await index.index_version(session, item, version, relative_path)
         digest = content_hash(body)
+        self._activate_vault_version(item, binding, version, relative_path, digest)
+        return version
+
+    async def _new_vault_version(
+        self,
+        session: AsyncSession,
+        item: KnowledgeItem,
+        title: str,
+        body: str,
+        relative_path: str,
+        *,
+        source_metadata_json: str | None = None,
+        summary: str | None = None,
+        suggested_tags_json: str = "[]",
+        prompt_version: str | None = None,
+    ) -> ContentVersion:
         version = ContentVersion(
             knowledge_item_id=item.id,
             version_no=await self._next_version_no(session, item.id),
             source_kind="vault",
             title=title[:300],
             body=normalize_content(body),
-            content_hash=digest,
-            suggested_tags_json="[]",
+            content_hash=content_hash(body),
+            summary=summary,
+            suggested_tags_json=suggested_tags_json,
+            prompt_version=prompt_version,
             source_metadata_json=source_metadata_json
             or self._vault_source_metadata(item, body, relative_path),
         )
         session.add(version)
         await session.flush()
-        index = IndexService(self.vector_store, self.embedding_provider)
-        await index.index_version(session, item, version, relative_path)
+        return version
+
+    @staticmethod
+    def _activate_vault_version(
+        item: KnowledgeItem,
+        binding: NoteBinding,
+        version: ContentVersion,
+        relative_path: str,
+        digest: str,
+    ) -> None:
         item.title = version.title
         item.content_hash = digest
         item.current_content_version_id = version.id
@@ -694,10 +916,21 @@ class Stage2Service:
         binding.sync_state = "synced"
         binding.last_synced_at = datetime.now(timezone.utc)
         binding.last_error = None
-        return version
+
+    def _discard_candidate_vectors(self, version_id: str) -> None:
+        for attempt in range(2):
+            try:
+                self.vector_store.delete_version(version_id)
+                return
+            except Exception as error:
+                if attempt == 1:
+                    logger.error(
+                        "publish_candidate_vector_cleanup_failed",
+                        error_type=type(error).__name__,
+                    )
 
     async def rescan(self, minimum_file_age_seconds: float = 0) -> dict[str, int]:
-        async with self._mutation_lock:
+        async with self.mutation_lock:
             return await self._rescan(minimum_file_age_seconds)
 
     async def _rescan(self, minimum_file_age_seconds: float) -> dict[str, int]:
@@ -812,15 +1045,23 @@ class Stage2Service:
 
     async def get_item(
         self, item_id: str
-    ) -> tuple[KnowledgeItem, ContentVersion, NoteBinding | None]:
+    ) -> tuple[KnowledgeItem, ContentVersion | None, NoteBinding | None]:
         async with self.session_factory() as session:
             item = await self._item(session, item_id)
-            version = await self._version(session, item)
+            version = (
+                await self._version(session, item)
+                if item.pending_content_version_id or item.current_content_version_id
+                else None
+            )
             binding_result = await session.execute(
                 select(NoteBinding).where(NoteBinding.knowledge_item_id == item.id)
             )
             binding = binding_result.scalar_one_or_none()
-            if item.status == "published" and binding is not None:
+            if (
+                item.status == "published"
+                and binding is not None
+                and item.pending_content_version_id is None
+            ):
                 try:
                     note = self.vault().read(binding.relative_path)
                 except (OSError, ValueError):
@@ -829,12 +1070,13 @@ class Stage2Service:
                     # later rescan observes a stable, valid Markdown document.
                     pass
                 else:
-                    version.body = note.body
-                    version.content_hash = content_hash(note.body)
+                    if version is not None:
+                        version.body = note.body
+                        version.content_hash = content_hash(note.body)
             return item, version, binding
 
     async def soft_delete(self, item_id: str) -> None:
-        async with self._mutation_lock:
+        async with self.mutation_lock:
             async with self.session_factory() as session, session.begin():
                 item = await self._item(session, item_id)
                 item.status = "deleted"
@@ -849,9 +1091,10 @@ class Stage2Service:
         return item
 
     async def _version(self, session: AsyncSession, item: KnowledgeItem) -> ContentVersion:
-        if not item.current_content_version_id:
+        version_id = item.pending_content_version_id or item.current_content_version_id
+        if not version_id:
             raise ApplicationError(409, "content_not_ready", "内容版本尚未生成")
-        version = await session.get(ContentVersion, item.current_content_version_id)
+        version = await session.get(ContentVersion, version_id)
         if version is None or version.knowledge_item_id != item.id:
             raise ApplicationError(500, "content_version_invalid", "当前内容版本无效")
         return version

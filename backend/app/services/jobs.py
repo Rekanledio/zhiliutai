@@ -8,6 +8,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import ApplicationError
+from app.core.safety import redact_sensitive_text
 from app.db.models import JobAttempt, ProcessingJob
 
 JobHandler = Callable[[ProcessingJob], Awaitable[dict[str, object]]]
@@ -94,13 +95,16 @@ class JobRunner:
                 raise RuntimeError(f"Unknown job kind: {job_kind}")
             result_payload = await handler(job)
         except Exception as error:
-            logger.exception(
+            logger.error(
                 "job_failed", job_id=job_id, job_kind=job_kind, error_type=type(error).__name__
             )
+            error_code = getattr(error, "code", "job_failed")
+            error_message = getattr(error, "public_message", str(error))
+            error_type = getattr(error, "public_type", type(error).__name__)
             error_payload = {
-                "code": getattr(error, "code", "job_failed"),
-                "message": str(error),
-                "type": type(error).__name__,
+                "code": redact_sensitive_text(str(error_code)),
+                "message": redact_sensitive_text(str(error_message)),
+                "type": redact_sensitive_text(str(error_type)),
             }
 
         finished = datetime.now(timezone.utc)
@@ -117,14 +121,53 @@ class JobRunner:
                 .limit(1)
             )
             attempt = attempt_result.scalar_one()
-            if error_payload is None:
-                job.state = "succeeded"
-                job.stage = "complete"
-                job.progress = 1.0
-                job.result_json = json.dumps(result_payload or {}, ensure_ascii=False)
-                job.error_json = None
-                attempt.state = "succeeded"
-                attempt.stage = "complete"
+            if job.state == "cancelled":
+                attempt.state = "cancelled"
+                attempt.stage = "cancelled"
+                attempt.error_json = None
+            elif error_payload is None:
+                stored_result = dict(result_payload or {})
+                requested_stage = stored_result.pop("_job_stage", None)
+                requested_progress = stored_result.pop("_job_progress", None)
+                requested_state = stored_result.pop("_job_state", None)
+                resolved_stage = (
+                    str(requested_stage)[:80]
+                    if isinstance(requested_stage, str) and requested_stage
+                    else "complete"
+                )
+                resolved_progress = (
+                    max(0.0, min(1.0, float(requested_progress)))
+                    if isinstance(requested_progress, (int, float))
+                    and not isinstance(requested_progress, bool)
+                    else 1.0
+                )
+                if requested_state == "cancelled":
+                    job.state = "cancelled"
+                    job.stage = resolved_stage
+                    job.progress = resolved_progress
+                    job.result_json = json.dumps(stored_result, ensure_ascii=False)
+                    job.error_json = None
+                    attempt.state = "cancelled"
+                    attempt.stage = job.stage
+                elif requested_state not in {None, "succeeded"}:
+                    encoded = json.dumps(
+                        {"code": "invalid_job_result", "message": "任务结果无效"},
+                        ensure_ascii=False,
+                    )
+                    job.state = "failed"
+                    job.stage = "failed"
+                    job.error_json = encoded
+                    attempt.state = "failed"
+                    attempt.stage = "failed"
+                    attempt.error_json = encoded
+                else:
+                    job.state = "succeeded"
+                    job.stage = resolved_stage
+                    job.progress = resolved_progress
+                    job.result_json = json.dumps(stored_result, ensure_ascii=False)
+                    job.error_json = None
+                    attempt.state = "succeeded"
+                    attempt.stage = job.stage
             else:
                 encoded = json.dumps(error_payload, ensure_ascii=False)
                 job.state = "failed"
@@ -155,6 +198,20 @@ class JobRunner:
             job.error_json = None
             job.finished_at = None
             await session.flush()
+            return job
+
+    async def cancel(self, job_id: str) -> ProcessingJob:
+        async with self.session_factory() as session, session.begin():
+            job = await session.get(ProcessingJob, job_id)
+            if job is None:
+                raise ApplicationError(404, "job_not_found", "任务不存在")
+            if job.state not in {"queued", "running"}:
+                raise ApplicationError(409, "job_not_cancellable", "当前任务不可取消")
+            now = datetime.now(timezone.utc)
+            job.state = "cancelled"
+            job.stage = "cancelled"
+            job.finished_at = now
+            job.heartbeat_at = now
             return job
 
     async def run_forever(self) -> None:

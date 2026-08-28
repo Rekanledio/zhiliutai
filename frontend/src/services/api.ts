@@ -42,6 +42,10 @@ export interface KnowledgeItem {
   source_type: string;
   status: string;
   content_hash: string;
+  current_content_version_id?: string | null;
+  pending_content_version_id?: string | null;
+  has_pending_review?: boolean;
+  source_metadata?: Record<string, unknown> | null;
   body?: string | null;
   summary?: string | null;
   suggested_tags: string[];
@@ -75,7 +79,15 @@ export interface ObsidianStatus {
 }
 
 export interface CitationLocator {
-  kind: "pdf" | "docx" | "webpage" | "obsidian" | "none";
+  kind:
+    | "pdf"
+    | "docx"
+    | "webpage"
+    | "obsidian"
+    | "video"
+    | "video_chapter"
+    | "video_keyframe"
+    | "none";
   page?: number;
   page_label?: string;
   element?: string;
@@ -86,6 +98,11 @@ export interface CitationLocator {
   row?: number;
   url?: string;
   path?: string;
+  start_ms?: number;
+  end_ms?: number;
+  language?: string;
+  event_type?: "scene" | "slide" | "code" | "ui" | "speaker" | "other";
+  keyframe_ids?: string[];
 }
 
 export interface CitationTarget {
@@ -94,6 +111,9 @@ export interface CitationTarget {
   item_id?: string;
   page?: number;
   url?: string;
+  start_ms?: number;
+  end_ms?: number;
+  keyframe_id?: string;
 }
 
 export interface RetrievalInfo {
@@ -120,6 +140,25 @@ export interface Citation {
   locator: CitationLocator;
   target: CitationTarget;
   retrieval: RetrievalInfo;
+}
+
+export interface VideoCitationSegment {
+  start_ms: number;
+  end_ms: number;
+  text: string;
+  language?: string | null;
+}
+
+export interface VideoCitationPreview {
+  kind: "transcript" | "keyframe";
+  artifact_id: string;
+  start_ms: number;
+  end_ms: number;
+  text?: string;
+  language?: string | null;
+  segments?: VideoCitationSegment[];
+  keyframe_id?: string;
+  media_type?: string;
 }
 
 export interface EvidenceAssessment {
@@ -303,7 +342,6 @@ export function searchKnowledge(
   query: string,
   options: {
     limit?: number;
-    rewrite?: "auto" | "off";
     sourceTypes?: string[];
     signal?: AbortSignal;
   } = {},
@@ -313,11 +351,147 @@ export function searchKnowledge(
     body: JSON.stringify({
       query,
       limit: options.limit ?? 6,
-      rewrite: options.rewrite ?? "off",
       source_types: options.sourceTypes,
     }),
     signal: options.signal,
   });
+}
+
+function openTarget(target: string, unavailableMessage: string, code: string): void {
+  if (typeof window.open !== "function") {
+    throw new ApiError(unavailableMessage, null, code, null);
+  }
+  const opened = window.open(target, "_blank", "noopener,noreferrer");
+  if (!opened) {
+    throw new ApiError(unavailableMessage, null, code, null);
+  }
+}
+
+export async function openArtifact(
+  artifactId: string,
+  page?: number,
+  options: { startMs?: number; endMs?: number; keyframeId?: string } = {},
+): Promise<void> {
+  if (!/^[A-Za-z0-9-]{1,80}$/.test(artifactId)) {
+    throw new ApiError("来源文件链接无效", null, "invalid_artifact_target", null);
+  }
+  if (page !== undefined && (!Number.isInteger(page) || page < 1)) {
+    throw new ApiError("来源页码无效", null, "invalid_artifact_target", null);
+  }
+  const path = "/api/artifacts/" + encodeURIComponent(artifactId);
+  try {
+    const response = await fetch(apiBase + path, {
+      method: "HEAD",
+      headers: {
+        Accept: "application/octet-stream",
+        "X-Request-ID": clientRequestId(),
+      },
+    });
+    if (!response.ok) {
+      throw await apiErrorFromResponse(response, "来源文件不可访问");
+    }
+  } catch (error) {
+    if (error instanceof ApiError) {
+      throw error;
+    }
+    throw new ApiError("来源文件不可访问", null, "artifact_unavailable", null);
+  }
+  const fragment =
+    page !== undefined
+      ? "#page=" + encodeURIComponent(String(page))
+      : options.startMs !== undefined
+        ? "#t=" +
+          encodeURIComponent(
+            String(options.startMs / 1000) +
+              (options.endMs === undefined ? "" : "," + String(options.endMs / 1000)),
+          ) +
+          (options.keyframeId
+            ? "&keyframe=" + encodeURIComponent(options.keyframeId)
+            : "")
+        : "";
+  openTarget(
+    apiBase + path + fragment,
+    "浏览器阻止打开来源文件",
+    "target_blocked",
+  );
+}
+
+export async function getVideoCitation(
+  artifactId: string,
+  options: { startMs?: number; endMs?: number; keyframeId?: string } = {},
+): Promise<VideoCitationPreview> {
+  if (!/^[A-Za-z0-9-]{1,80}$/.test(artifactId)) {
+    throw new ApiError("来源文件链接无效", null, "invalid_artifact_target", null);
+  }
+  if (
+    (options.startMs !== undefined &&
+      (!Number.isInteger(options.startMs) || options.startMs < 0)) ||
+    (options.endMs !== undefined &&
+      (!Number.isInteger(options.endMs) || options.endMs <= 0)) ||
+    (options.startMs !== undefined &&
+      options.endMs !== undefined &&
+      options.startMs >= options.endMs) ||
+    (options.keyframeId !== undefined &&
+      (options.keyframeId.length < 1 ||
+        options.keyframeId.length > 200 ||
+        /[\u0000-\u001f\u007f]/.test(options.keyframeId)))
+  ) {
+    throw new ApiError("视频时间戳无效", null, "invalid_video_locator", null);
+  }
+  const query = new URLSearchParams();
+  if (options.startMs !== undefined) {
+    query.set("start_ms", String(options.startMs));
+  }
+  if (options.endMs !== undefined) {
+    query.set("end_ms", String(options.endMs));
+  }
+  if (options.keyframeId !== undefined) {
+    query.set("keyframe_id", options.keyframeId);
+  }
+  const suffix = query.toString() ? "?" + query.toString() : "";
+  const preview = await requestJson<VideoCitationPreview>(
+    "/api/artifacts/" + encodeURIComponent(artifactId) + "/locator" + suffix,
+  );
+  if (
+    !preview ||
+    (preview.kind !== "transcript" && preview.kind !== "keyframe") ||
+    preview.artifact_id !== artifactId ||
+    !Number.isInteger(preview.start_ms) ||
+    !Number.isInteger(preview.end_ms) ||
+    preview.start_ms < 0 ||
+    preview.start_ms >= preview.end_ms
+  ) {
+    throw new ApiError("视频定位响应无效", null, "invalid_video_locator", null);
+  }
+  return preview;
+}
+
+export function openExternalUrl(url: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new ApiError("网页来源链接无效", null, "invalid_url_target", null);
+  }
+  if (
+    !["http:", "https:"].includes(parsed.protocol) ||
+    parsed.username ||
+    parsed.password ||
+    Array.from(parsed.searchParams.keys()).some((key) =>
+      ["api_key", "apikey", "key", "access_token", "authorization", "password", "secret", "token"].includes(
+        key.toLowerCase().replaceAll("-", "_"),
+      ),
+    ) ||
+    Array.from(new URLSearchParams(parsed.hash.replace(/^#/, "")).keys()).some((key) =>
+      ["api_key", "apikey", "key", "access_token", "authorization", "password", "secret", "token"].includes(
+        key.toLowerCase().replaceAll("-", "_"),
+      ),
+    ) ||
+    /\b(?:sk|rk|pk)-[A-Za-z0-9][A-Za-z0-9._-]{6,}\b/i.test(url)
+  ) {
+    throw new ApiError("网页来源链接无效", null, "invalid_url_target", null);
+  }
+  openTarget(parsed.toString(), "浏览器阻止打开网页来源", "target_blocked");
 }
 
 export async function streamChat(
@@ -362,6 +536,21 @@ export async function streamChat(
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let streamPhase: "start" | "meta" | "delta" | "citations" | "done" = "start";
+    let sawDone = false;
+
+    const validateStreamOrder = (eventName: string) => {
+      const valid =
+        (eventName === "meta" && streamPhase === "start") ||
+        (eventName === "delta" && (streamPhase === "meta" || streamPhase === "delta")) ||
+        (eventName === "citations" && (streamPhase === "meta" || streamPhase === "delta")) ||
+        (eventName === "done" && streamPhase === "citations");
+      if (!valid) {
+        throw new ApiError("问答流顺序无效", response.status, "invalid_stream_order", null);
+      }
+      streamPhase = eventName as typeof streamPhase;
+      sawDone = eventName === "done";
+    };
 
     const emitFrame = (frame: string) => {
       let eventName = "message";
@@ -388,6 +577,7 @@ export async function streamChat(
         eventName === "citations" ||
         eventName === "done"
       ) {
+        validateStreamOrder(eventName);
         options.onEvent({ event: eventName, data } as ChatStreamEvent);
       }
     };
@@ -407,6 +597,9 @@ export async function streamChat(
         }
         break;
       }
+    }
+    if (!sawDone) {
+      throw new ApiError("问答流不完整", response.status, "invalid_stream_order", null);
     }
   } catch (error) {
     if (error instanceof ApiError) {
@@ -448,6 +641,29 @@ export function submitText(
   });
 }
 
+export function submitVideo(
+  url: string,
+  options: {
+    title?: string;
+    language?: string;
+    enableVision?: boolean;
+    idempotencyKey?: string;
+    signal?: AbortSignal;
+  } = {},
+): Promise<{ item_id: string; job_id: string; deduplicated: boolean }> {
+  return requestJson("/api/sources/video", {
+    method: "POST",
+    body: JSON.stringify({
+      url,
+      title: options.title || undefined,
+      language: options.language || undefined,
+      enable_vision: options.enableVision ?? false,
+      idempotency_key: options.idempotencyKey || undefined,
+    }),
+    signal: options.signal,
+  });
+}
+
 export function getJobs(signal?: AbortSignal): Promise<ProcessingJob[]> {
   return requestJson("/api/jobs", { signal });
 }
@@ -458,6 +674,10 @@ export function getJob(id: string, signal?: AbortSignal): Promise<ProcessingJob>
 
 export function retryJob(id: string): Promise<ProcessingJob> {
   return requestJson("/api/jobs/" + id + "/retry", { method: "POST" });
+}
+
+export function cancelJob(id: string): Promise<ProcessingJob> {
+  return requestJson("/api/jobs/" + id + "/cancel", { method: "POST" });
 }
 
 export function getItems(status?: string, signal?: AbortSignal): Promise<KnowledgeItem[]> {

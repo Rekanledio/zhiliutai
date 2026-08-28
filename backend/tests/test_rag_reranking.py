@@ -1,9 +1,6 @@
-from pathlib import Path
-
 import pytest
 from fastapi.testclient import TestClient
 
-from app.rag.evaluation import evaluate_rankings, load_eval_cases
 from app.rag.reranking import KeywordOverlapReranker
 from app.rag.types import RetrievedChunk
 
@@ -80,20 +77,3 @@ async def test_reranker_failure_keeps_rrf_results_and_marks_degraded(
     assert diagnostics.reranker_available is False
     assert diagnostics.channel_errors["reranker"] == "RuntimeError"
     assert all(chunk.rerank_score is None for chunk in chunks)
-
-
-def test_fixed_chinese_eval_has_explicit_thresholds() -> None:
-    cases = load_eval_cases(Path(__file__).parent / "fixtures" / "rag_eval_cases.json")
-    rankings = {
-        "sqlite-authority": ["eval-sqlite", "noise"],
-        "citation-locator": ["noise", "eval-citation"],
-        "obsidian-source": ["eval-obsidian", "noise"],
-        "evidence-refusal": ["noise", "eval-evidence"],
-    }
-
-    metrics = evaluate_rankings(cases, rankings, k=2)
-
-    assert metrics["case_count"] == 4
-    assert metrics["recall_at_k"] >= 1.0
-    assert metrics["hit_rate_at_k"] >= 1.0
-    assert metrics["mrr_at_k"] >= 0.75

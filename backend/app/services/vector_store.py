@@ -121,6 +121,17 @@ class QdrantLocalStore:
             )
         )
 
+    def clear(self) -> None:
+        """Remove the derived local collection before a full index rebuild."""
+
+        with self._lock:
+            client = self._client()
+            try:
+                if client.collection_exists(COLLECTION_NAME):
+                    client.delete_collection(COLLECTION_NAME)
+            finally:
+                client.close()
+
     def _delete_filter(self, point_filter: models.Filter) -> None:
         with self._lock:
             self.ensure_collection()

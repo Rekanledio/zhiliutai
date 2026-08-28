@@ -1,10 +1,12 @@
+import json
 import socket
+import sqlite3
 
 import httpx
 from fastapi.testclient import TestClient
 
 from conftest import wait_for_job
-from fixture_sources import build_pdf_fixture
+from fixture_sources import build_docx_fixture, build_pdf_fixture
 
 
 def _publish_text(client: TestClient, content: str, source_type: str = "markdown") -> str:
@@ -51,6 +53,11 @@ def test_search_empty_and_validation_keep_search_available_without_chat(client: 
     assert invalid.status_code == 422
     assert invalid.json()["error"]["code"] == "validation_error"
 
+    rewrite = client.post(
+        "/api/search", json={"query": "SQLite 证据", "rewrite": "auto"}
+    )
+    assert rewrite.status_code == 422
+
 
 def test_pdf_search_uses_exact_page_and_controlled_artifact_target(
     client: TestClient,
@@ -79,9 +86,123 @@ def test_pdf_search_uses_exact_page_and_controlled_artifact_target(
     artifact_response = client.get(f"/api/artifacts/{artifact_id}")
     assert artifact_response.status_code == 200
     assert artifact_response.headers["content-type"].startswith("application/pdf")
+    assert client.head(f"/api/artifacts/{artifact_id}").status_code == 200
 
     assert client.delete(f"/api/items/{item_id}").status_code == 204
     assert client.get(f"/api/artifacts/{artifact_id}").status_code == 404
+
+
+def test_pdf_locator_uses_source_metadata_and_falls_back_when_metadata_is_invalid(
+    client: TestClient, settings
+) -> None:
+    uploaded = client.post(
+        "/api/sources/files",
+        files={"file": ("guide.pdf", build_pdf_fixture(), "application/pdf")},
+    )
+    assert uploaded.status_code == 202, uploaded.text
+    item_id = uploaded.json()["item_id"]
+    wait_for_job(client, uploaded.json()["job_id"])
+    assert client.post(f"/api/items/{item_id}/review", json={}).status_code == 200
+    assert client.post(f"/api/items/{item_id}/publish").status_code == 200
+
+    with sqlite3.connect(settings.database_path) as connection:
+        connection.execute(
+            "UPDATE chunks SET source_locator = ? "
+            "WHERE knowledge_item_id = ? AND content LIKE ?",
+            (json.dumps({"kind": "pdf", "page": 999}), item_id, "%第二页内容%"),
+        )
+        connection.commit()
+
+    exact = client.post("/api/search", json={"query": "第二页内容"})
+    assert exact.status_code == 200, exact.text
+    citation = next(
+        result["citation"]
+        for result in exact.json()["results"]
+        if result["knowledge_item_id"] == item_id
+        and "第二页内容" in result["excerpt"]
+    )
+    assert citation["locator"] == {"kind": "pdf", "page": 2, "page_label": "2"}
+
+    with sqlite3.connect(settings.database_path) as connection:
+        version_id = connection.execute(
+            "SELECT current_content_version_id FROM knowledge_items WHERE id = ?",
+            (item_id,),
+        ).fetchone()[0]
+        metadata = json.loads(
+            connection.execute(
+                "SELECT source_metadata_json FROM content_versions WHERE id = ?",
+                (version_id,),
+            ).fetchone()[0]
+        )
+        metadata["page_count"] = 1
+        connection.execute(
+            "UPDATE content_versions SET source_metadata_json = ? WHERE id = ?",
+            (json.dumps(metadata, ensure_ascii=False), version_id),
+        )
+        connection.commit()
+
+    fallback = client.post("/api/search", json={"query": "第二页内容"})
+    assert fallback.status_code == 200, fallback.text
+    fallback_citation = next(
+        result["citation"]
+        for result in fallback.json()["results"]
+        if result["knowledge_item_id"] == item_id
+        and "第二页内容" in result["excerpt"]
+    )
+    assert fallback_citation["locator_status"] == "fallback"
+    assert fallback_citation["target"]["kind"] == "obsidian"
+
+
+def test_docx_citation_uses_authoritative_heading_and_table_row_locators(
+    client: TestClient,
+) -> None:
+    uploaded = client.post(
+        "/api/sources/files",
+        files={
+            "file": (
+                "guide.docx",
+                build_docx_fixture(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert uploaded.status_code == 202, uploaded.text
+    item_id = uploaded.json()["item_id"]
+    wait_for_job(client, uploaded.json()["job_id"])
+    assert client.post(f"/api/items/{item_id}/review", json={}).status_code == 200
+    assert client.post(f"/api/items/{item_id}/publish").status_code == 200
+
+    heading_response = client.post("/api/search", json={"query": "审核流程"})
+    assert heading_response.status_code == 200, heading_response.text
+    heading = next(
+        result["citation"]
+        for result in heading_response.json()["results"]
+        if result["knowledge_item_id"] == item_id
+    )
+    assert heading["locator_status"] == "exact"
+    assert heading["locator"] == {
+        "kind": "docx",
+        "element": "heading",
+        "heading_level": 2,
+        "heading_path": ["DOCX 知识指南", "审核流程"],
+        "paragraph": 3,
+    }
+
+    table_response = client.post("/api/search", json={"query": "合成 fixture"})
+    assert table_response.status_code == 200, table_response.text
+    table = next(
+        result["citation"]
+        for result in table_response.json()["results"]
+        if result["knowledge_item_id"] == item_id
+    )
+    assert table["locator_status"] == "exact"
+    assert table["locator"] == {
+        "kind": "docx",
+        "element": "table_row",
+        "heading_path": ["DOCX 知识指南", "审核流程"],
+        "table": 1,
+        "row": 2,
+    }
 
 
 def test_webpage_search_uses_saved_final_url_without_network(
@@ -91,6 +212,12 @@ def test_webpage_search_uses_saved_final_url_without_network(
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://example.test/fixed":
+            return httpx.Response(
+                302,
+                headers={"location": "https://example.test/final"},
+                request=request,
+            )
         return httpx.Response(
             200,
             headers={"content-type": "text/html; charset=utf-8"},
@@ -119,5 +246,5 @@ def test_webpage_search_uses_saved_final_url_without_network(
     )
     citation = result["citation"]
     assert citation["locator_status"] == "exact"
-    assert citation["locator"]["url"] == "https://example.test/fixed"
-    assert citation["target"] == {"kind": "url", "url": "https://example.test/fixed"}
+    assert citation["locator"]["url"] == "https://example.test/final"
+    assert citation["target"] == {"kind": "url", "url": "https://example.test/final"}

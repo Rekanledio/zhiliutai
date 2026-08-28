@@ -104,6 +104,9 @@ def parse_docx(data: bytes) -> ParsedSource:
         heading_path: list[str] = []
         paragraph_number = 0
         table_number = 0
+        heading_count = 0
+        heading_paragraphs: list[int] = []
+        table_row_counts: list[int] = []
         for child in document.element.body.iterchildren():
             if child.tag == qn("w:p"):
                 paragraph = Paragraph(child, document)
@@ -113,6 +116,8 @@ def parse_docx(data: bytes) -> ParsedSource:
                 paragraph_number += 1
                 level = _heading_level(paragraph.style.name if paragraph.style else "")
                 if level is not None:
+                    heading_count += 1
+                    heading_paragraphs.append(paragraph_number)
                     heading_path = heading_path[: level - 1]
                     heading_path.append(text)
                     rendered = f"{'#' * level} {text}"
@@ -135,6 +140,7 @@ def parse_docx(data: bytes) -> ParsedSource:
             elif child.tag == qn("w:tbl"):
                 table = Table(child, document)
                 table_number += 1
+                table_row_counts.append(len(table.rows))
                 for row_number, row in enumerate(table.rows, start=1):
                     cells = [_clean_text(cell.text) for cell in row.cells]
                     row_text = " | ".join(cell for cell in cells if cell)
@@ -155,6 +161,9 @@ def parse_docx(data: bytes) -> ParsedSource:
         metadata = {
             "paragraph_count": paragraph_number,
             "table_count": table_number,
+            "heading_count": heading_count,
+            "heading_paragraphs": heading_paragraphs,
+            "table_row_counts": table_row_counts,
         }
         media_type = (
             "application/"

@@ -3,7 +3,7 @@
 ## 需求依据
 
 - docs/PROJECT.md 是当前唯一的产品需求和架构基线。若其他文档与它冲突，以它为准，并在 docs/DECISIONS.md 记录需要修订的决定。
-- 本项目按阶段实施：阶段 0/1/2/3 已通过，当前实施阶段 4；未通过当前阶段验收前，不实现下一阶段功能。
+- 本项目按阶段实施：阶段 0–5 已通过；阶段 6 最终结论为 **PASS WITH NON-BLOCKING RISKS**（Sol 已完成最终复验）。除已批准的极小维护外，不扩展下一阶段功能。
 - 参考界面只用于借鉴布局、信息层级、色彩氛围和交互节奏。不要复制其品牌、素材、原始文案或无关业务功能。
 
 ## 实施与验证
@@ -14,7 +14,7 @@
 - 日常开发使用 SQLite、SQLite FTS5、Qdrant Local 和 Python JobRunner，不依赖 Docker、PostgreSQL、Redis 或 Celery。所有服务默认只绑定 127.0.0.1；Docker 只用于交付和 CI。
 - 真实 Vault、用户数据、API Key、数据库卷、Artifact 和本机 .env 不进入 Git；只提交 .env.example。
 - 测试使用临时 Vault 和脱敏 fixtures，不直接触碰用户 Vault。
-- 阶段 4 RAG 测试使用 SQLite、SQLite FTS5、Qdrant Local、临时 Artifact、MockTransport
+- 阶段 4/6 RAG 与 Graph 测试使用 SQLite、SQLite FTS5、Qdrant Local、临时 Artifact、MockTransport
   和确定性 Provider；不得访问真实网页、真实 Vault 或真实模型密钥。
 
 ## 代码边界

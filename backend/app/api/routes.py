@@ -20,14 +20,17 @@ from app.schemas.stage2 import (
     JobResponse,
     ObsidianOpenResponse,
     ObsidianStatusResponse,
+    PublishRequest,
     RescanResponse,
     ReviewRequest,
     SubmissionResponse,
     TextSourceRequest,
     UrlSourceRequest,
 )
+from app.schemas.video import VideoSourceRequest
 from app.services.health import build_health_report
 from app.services.stage2 import Stage2Service
+from app.workflows.contracts import IngestionResumeDecision
 
 router = APIRouter(prefix="/api")
 
@@ -71,6 +74,9 @@ def item_out(
         source_type=item.source_type,
         status=item.status,
         content_hash=version.content_hash if version else item.content_hash,
+        current_content_version_id=item.current_content_version_id,
+        pending_content_version_id=item.pending_content_version_id,
+        has_pending_review=item.pending_content_version_id is not None,
         body=version.body if version else None,
         summary=version.summary if version else None,
         suggested_tags=tags,
@@ -243,6 +249,24 @@ async def add_url(
     )
 
 
+@router.post(
+    "/sources/video", response_model=SubmissionResponse, status_code=202, tags=["sources"]
+)
+async def add_video(
+    payload: VideoSourceRequest, request: Request
+) -> SubmissionResponse:
+    item, job, deduplicated = await service(request).submit_video(
+        payload.url,
+        payload.title,
+        payload.language,
+        payload.idempotency_key,
+        payload.enable_vision,
+    )
+    return SubmissionResponse(
+        item_id=item.id, job_id=job.id, deduplicated=deduplicated
+    )
+
+
 @router.get("/jobs", response_model=list[JobResponse], tags=["jobs"])
 async def list_jobs(request: Request) -> list[JobResponse]:
     async with request.app.state.session_factory() as session:
@@ -268,6 +292,14 @@ async def get_job(job_id: str, request: Request) -> JobResponse:
 @router.post("/jobs/{job_id}/retry", response_model=JobResponse, tags=["jobs"])
 async def retry_job(job_id: str, request: Request) -> JobResponse:
     job = await request.app.state.job_runner.retry(job_id)
+    return job_out(job)
+
+
+@router.post("/jobs/{job_id}/cancel", response_model=JobResponse, tags=["jobs"])
+async def cancel_job(job_id: str, request: Request) -> JobResponse:
+    job = await request.app.state.ingestion_workflow.cancel_job(job_id)
+    if job is None:
+        job = await request.app.state.job_runner.cancel(job_id)
     return job_out(job)
 
 
@@ -306,16 +338,34 @@ async def patch_item(
 async def review_item(
     item_id: str, payload: ReviewRequest, request: Request
 ) -> ItemResponse:
-    if not payload.approved:
-        raise ApplicationError(422, "review_rejected", "当前只支持明确审核通过")
-    await service(request).review(item_id)
+    decision = IngestionResumeDecision(decision=payload.resolved_decision())
+    run = await request.app.state.ingestion_workflow.resume_item(
+        item_id,
+        decision,
+        gate="review",
+    )
+    if run.get("stage") == "failed":
+        raise ApplicationError(500, "internal_error", "服务内部错误")
     item, version, binding = await service(request).get_item(item_id)
     return item_out(item, version, binding)
 
 
 @router.post("/items/{item_id}/publish", response_model=ItemResponse, tags=["items"])
-async def publish_item(item_id: str, request: Request) -> ItemResponse:
-    await service(request).publish(item_id)
+async def publish_item(
+    item_id: str,
+    request: Request,
+    payload: PublishRequest | None = None,
+) -> ItemResponse:
+    decision = IngestionResumeDecision(
+        decision=payload.resolved_decision() if payload is not None else "approve"
+    )
+    run = await request.app.state.ingestion_workflow.resume_item(
+        item_id,
+        decision,
+        gate="publish",
+    )
+    if run.get("stage") == "failed":
+        raise ApplicationError(500, "internal_error", "服务内部错误")
     item, version, binding = await service(request).get_item(item_id)
     return item_out(item, version, binding)
 
@@ -324,6 +374,13 @@ async def publish_item(item_id: str, request: Request) -> ItemResponse:
     "/items/{item_id}/reprocess", response_model=SubmissionResponse, tags=["items"]
 )
 async def reprocess_item(item_id: str, request: Request) -> SubmissionResponse:
+    async with request.app.state.session_factory() as session:
+        existing = await session.get(KnowledgeItem, item_id)
+    if existing is None or existing.deleted_at is not None:
+        raise ApplicationError(404, "item_not_found", "知识条目不存在")
+    if existing.source_type == "video":
+        item, job = await service(request).reprocess_video(item_id)
+        return SubmissionResponse(item_id=item.id, job_id=job.id, deduplicated=False)
     async with request.app.state.session_factory() as session, session.begin():
         item = await session.get(KnowledgeItem, item_id)
         if item is None or item.deleted_at is not None:
@@ -361,6 +418,11 @@ async def reprocess_item(item_id: str, request: Request) -> SubmissionResponse:
     return SubmissionResponse(item_id=item.id, job_id=job.id, deduplicated=False)
 
 
+@router.post("/video/cleanup", response_model=dict[str, int], tags=["sources"])
+async def cleanup_video_artifacts(request: Request) -> dict[str, int]:
+    return await service(request).cleanup_video_artifacts()
+
+
 @router.delete("/items/{item_id}", status_code=204, tags=["items"])
 async def delete_item(item_id: str, request: Request) -> None:
     await service(request).soft_delete(item_id)
@@ -394,6 +456,19 @@ async def rescan_obsidian(request: Request) -> RescanResponse:
 )
 async def open_obsidian(item_id: str, request: Request) -> ObsidianOpenResponse:
     item, _version, binding = await service(request).get_item(item_id)
-    if binding is None or item.status != "published":
+    if (
+        binding is None
+        or item.status != "published"
+        or binding.knowledge_item_id != item.id
+        or binding.zhiliu_id != item.id
+        or binding.sync_state != "synced"
+    ):
         raise ApplicationError(409, "note_not_published", "条目尚未绑定 Obsidian 笔记")
-    return ObsidianOpenResponse(uri=service(request).vault().uri(binding.relative_path))
+    vault = service(request).vault()
+    try:
+        if not vault.resolve(binding.relative_path).is_file():
+            raise ApplicationError(404, "note_not_found", "Obsidian 笔记不可访问")
+        uri = vault.uri(binding.relative_path)
+    except (OSError, ValueError) as error:
+        raise ApplicationError(404, "note_not_found", "Obsidian 笔记不可访问") from error
+    return ObsidianOpenResponse(uri=uri)

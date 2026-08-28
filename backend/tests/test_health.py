@@ -175,6 +175,81 @@ async def test_unreachable_model_does_not_report_healthy(
     assert (await health_service.probe_model_providers(settings)).state == "degraded"
 
 
+@pytest.mark.asyncio
+async def test_asr_and_vision_health_probe_uses_keys_without_exposing_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    class CaptureClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self) -> "CaptureClient":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            pass
+
+        async def get(self, url: str, *, headers: dict[str, str]) -> httpx.Response:
+            calls.append((url, headers))
+            return httpx.Response(200)
+
+    monkeypatch.setattr(health_service.httpx, "AsyncClient", CaptureClient)
+    asr_key = "synthetic-asr-key"
+    vision_key = "synthetic-vision-key"
+    settings = Settings(
+        _env_file=None,
+        database_url=sqlite_url_for(tmp_path / "db.sqlite"),
+        qdrant_path=tmp_path / "qdrant",
+        artifact_root=tmp_path / "artifacts",
+        asr_base_url="http://127.0.0.1:9001/v1",
+        asr_model="fake-asr",
+        asr_api_key=asr_key,
+        vision_base_url="http://127.0.0.1:9002/v1",
+        vision_model="fake-vision",
+        vision_api_key=vision_key,
+    )
+
+    component = await health_service.probe_model_providers(settings)
+
+    assert component.state == "configured"
+    assert calls == [
+        (
+            "http://127.0.0.1:9001/v1/models",
+            {"Authorization": f"Bearer {asr_key}"},
+        ),
+        (
+            "http://127.0.0.1:9002/v1/models",
+            {"Authorization": f"Bearer {vision_key}"},
+        ),
+    ]
+    assert asr_key not in component.detail
+    assert vision_key not in component.detail
+    assert asr_key not in repr(settings)
+    assert vision_key not in repr(settings)
+
+
+@pytest.mark.asyncio
+async def test_health_rejects_model_endpoint_credentials_and_query_strings(
+    tmp_path: Path,
+) -> None:
+    secret = "synthetic-query-secret"
+    settings = Settings(
+        _env_file=None,
+        database_url=sqlite_url_for(tmp_path / "db.sqlite"),
+        qdrant_path=tmp_path / "qdrant",
+        artifact_root=tmp_path / "artifacts",
+        asr_base_url=f"http://127.0.0.1:9001/v1?api_key={secret}",
+        asr_model="fake-asr",
+    )
+
+    component = await health_service.probe_model_providers(settings)
+
+    assert component.state == "degraded"
+    assert secret not in component.detail
+
+
 def test_artifact_root_is_resolved_from_repository_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -202,7 +277,7 @@ def test_http_validation_and_internal_errors_keep_request_id(
     exception_events: list[str] = []
 
     class CaptureLogger:
-        def exception(self, event: str, **_: object) -> None:
+        def error(self, event: str, **_: object) -> None:
             exception_events.append(event)
 
         def info(self, *_: object, **__: object) -> None:

@@ -57,6 +57,7 @@ def settings(tmp_path: Path) -> Settings:
         database_url=sqlite_url_for(tmp_path / "zhiliutai.db"),
         qdrant_path=tmp_path / "qdrant",
         artifact_root=tmp_path / "artifacts",
+        workflow_checkpoint_path=tmp_path / "workflow-checkpoints.db",
         vault_path=str(vault),
         embedding_dimensions=8,
         obsidian_watch_interval_seconds=0.05,
