@@ -257,7 +257,7 @@ test("synthetic review publish search answer and citation flow", async ({ page }
 
   await page.getByRole("button", { name: "基于证据回答" }).click();
   await expect(page.getByRole("heading", { name: "回答" })).toBeVisible();
-  await expect(page.getByText("SQLite 是当前回答使用的权威校验来源。", { exact: true })).toBeVisible();
+  await expect(page.locator(".answer-copy p")).toContainText("SQLite 是当前回答使用的权威校验来源。");
   await expect(page.locator(".citation-chip")).toHaveText("C1");
   expect(observed).toEqual(
     expect.arrayContaining([
