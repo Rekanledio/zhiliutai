@@ -249,7 +249,7 @@ test("synthetic review publish search answer and citation flow", async ({ page }
   await page.getByRole("button", { name: "搜索与问答" }).click();
   await expect(page.getByRole("heading", { name: "搜索与问答" })).toBeVisible();
   await page.getByLabel("搜索问题或关键词").fill("SQLite");
-  await page.getByRole("button", { name: "搜索" }).click();
+  await page.getByRole("button", { name: "搜索", exact: true }).click();
   await expect(page.getByRole("heading", { name: "当前知识证据" })).toBeVisible();
   await expect(page.locator(".citation-card")).toContainText("合成 E2E 知识");
   await expect(page.locator(".citation-card")).toContainText("精确定位");
