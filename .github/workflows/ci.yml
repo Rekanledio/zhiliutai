@@ -48,6 +48,7 @@ jobs:
   playwright:
     needs: [backend, frontend]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: frontend
