@@ -2,7 +2,7 @@
 
 知流台是单用户、本机优先的个人知识采集、整理、检索和问答工作台。用户确认后的正文唯一写入 Obsidian Markdown；SQLite 保存业务元数据、任务状态与 FTS5 索引；Qdrant Local 保存向量索引；来源与处理产物位于本地 Artifact 目录。
 
-当前阶段：阶段 0–6 已实现；阶段 6 最终结论为 **PASS WITH NON-BLOCKING RISKS**（Sol 已完成最终复验）。现有实现包含两个 LangGraph（IngestionGraph、QuestionAnswerGraph）、HITL/checkpoint、五工具 MCP Provider、显式配置 MCP Consumer、人工合集、只读设置与受控备份/重扫/派生重建。用户确认后的正文仍只写入 Obsidian Markdown；真实模型、网页、视频和外部 MCP 不属于自动化测试。提交 `ba7e247aac0213c85e223bff3238143af16a99f8` 的四个 jobs 是 H3 基线 CI，均通过；H4 新增的 Playwright 合成用例尚未在 CI 执行，本地仅完成 typecheck/list，实际限制以 `docs/STATUS.md` 为准。
+当前阶段：阶段 0–6 已实现；阶段 6 最终结论为 **PASS WITH NON-BLOCKING RISKS**（Sol 已完成最终复验）。现有实现包含两个 LangGraph（IngestionGraph、QuestionAnswerGraph）、HITL/checkpoint、五工具 MCP Provider、显式配置 MCP Consumer、人工合集、只读设置与受控备份/重扫/派生重建。用户确认后的正文仍只写入 Obsidian Markdown；真实模型、网页、视频和外部 MCP 不属于自动化测试。提交 `ba7e247aac0213c85e223bff3238143af16a99f8` 仅作为 H3 基线 CI，四个 jobs 均通过；H4 代码/测试提交 `5995efb0f39732b175994cdb7d450e8c2eccf144` 的 run `33281127978` 已在 CI Chromium 执行 3 个合成 E2E，四个 jobs 均通过。本机未安装匹配版本的 Playwright Chromium，实际限制以 `docs/STATUS.md` 为准。
 
 ## 本地快速开始
 
@@ -79,7 +79,7 @@ npm --prefix frontend run e2e
 
 Dockerfile 是交付能力，Docker build 在 GitHub Actions 或具备 Docker 的环境验证，不是本地开发前置条件。Playwright 使用固定版本、127.0.0.1 Vite 服务和稳定合成 API fixture；CI 安装 Chromium 并保存失败产物。本机 runner 的实际限制不会被伪装成通过。
 
-最近一次收口记录：Sol 全量后端为 209 passed，前端为 5 files / 27 tests；H3 基线 CI 提交的四个 jobs 全部通过。H4 的 Playwright fixture 覆盖合集列表/详情/移除成员，以及设置页五类 Provider、FFmpeg 未配置说明和一次合成备份成功响应；H4 尚未在 CI 执行，本地仅完成 typecheck/list，本机真实浏览器执行仍以环境限制登记，不把未运行写成通过。
+最近一次收口记录：Sol 全量后端为 209 passed，前端为 5 files / 27 tests；H3 基线 CI 提交的四个 jobs 全部通过。H4 的 Playwright fixture 覆盖合集列表/详情/移除成员，以及设置页五类 Provider、FFmpeg 未配置说明和一次合成备份成功响应；H4 提交已由 CI Chromium 执行 3 个合成 E2E 并通过，本机真实浏览器执行仍以环境限制登记，不把本机未运行写成通过。
 
 ## 安全边界
 

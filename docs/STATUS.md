@@ -67,7 +67,8 @@ npm --prefix frontend run build                       passed
 npm --prefix frontend run e2e:typecheck               passed
 npm --prefix frontend run e2e -- --list               passed：发现 3 个测试
 npm --prefix frontend run e2e                         本批未运行：本机缺少 Playwright 1.53 Chromium
-GitHub Actions commit ba7e247 / 4 H3 baseline jobs     passed；H4 新增 Playwright 用例尚未在 CI 执行
+GitHub Actions commit ba7e247 / 4 H3 baseline jobs     passed
+GitHub Actions commit 5995efb / run 33281127978        4 jobs passed；Playwright 实际执行 3 个合成 E2E
 git -c safe.directory=D:/Work/zhiliutai -C D:/Work/zhiliutai diff --check
                                                         passed
 ~~~
@@ -77,7 +78,7 @@ git -c safe.directory=D:/Work/zhiliutai -C D:/Work/zhiliutai diff --check
 ## 非阻塞风险与下一步
 
 - 合集 rename 在 Vault 写入成功但 SQLite 提交前发生不可捕获进程崩溃时，watcher 可能收敛出新合集并留下旧空合集；不会丢失知识正文或成员关系。
-- 提交 `ba7e247aac0213c85e223bff3238143af16a99f8` 的四个 H3 基线 CI jobs 均通过；H4 新增 Playwright 用例尚未在 CI 执行，本机仍未安装匹配版本的 Chromium，只登记为本机环境限制。
+- 提交 `5995efb0f39732b175994cdb7d450e8c2eccf144` 已推送；run `33281127978` 的 backend/frontend/docker/playwright 四个 jobs 均成功，Playwright 实际执行 3 个 H4 合成 E2E。本机仍未安装匹配版本的 Chromium，只登记为本机环境限制。
 - 真实 extractor、yt-dlp、FFmpeg、ASR/Vision/OCR、模型、网页和外部 MCP 互操作未验证；Docker build 也只由 CI/具备 Docker 的环境承担。
 - SQLite、Artifact、Vault、Qdrant 之间不具备跨存储物理事务；恢复后必须显式 rebuild，运行期依赖补偿和权威关系复核。
 - 阶段 4 的 reranker 协议风险和阶段 5 的 HTTPS/真实视频互操作风险继续有效。
@@ -85,6 +86,6 @@ git -c safe.directory=D:/Work/zhiliutai -C D:/Work/zhiliutai diff --check
 
 ## Git 与数据边界
 
-- H4 开始核对时分支为 `main`；HEAD 与 `origin/main` 均为 `ba7e247aac0213c85e223bff3238143af16a99f8`。
-- 本批提交/推送由 Sol 验收后执行；本批未读取、未修改或纳入提交受保护的 `data/manual/`。
+- H4 代码/测试提交 `5995efb0f39732b175994cdb7d450e8c2eccf144` 已推送并通过上述四个 jobs；本次证据同步提交仍由 Sol 验收后执行。
+- 本批未读取、未修改或纳入提交受保护的 `data/manual/`。
 - `.env`、SQLite、Qdrant、Artifact、Vault、node_modules、虚拟环境和构建缓存均不纳入 Git。

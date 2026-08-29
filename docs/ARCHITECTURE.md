@@ -344,8 +344,9 @@ Alembic migration。
 搜索、证据约束回答和 Citation 卡片。配置保留失败 trace、截图和视频；GitHub Actions 在独立
 job 中安装锁定版本的 Chromium、运行 E2E typecheck/Playwright 并始终上传
 `playwright-report`/`test-results`。所有未处理的 `/api/**` fixture 请求都会使测试失败。本机 runner
-在收集阶段未完成，不能把本地限制解释成浏览器通过。上述 H4 新增合集/设置 fixture 只完成本地
-typecheck/list，尚未进入 CI；不能把 H3 基线 CI 的结果解释为 H4 三个 E2E 已执行。
+在本机收集/执行阶段仍受 Chromium 环境限制，不能把本地限制解释成浏览器通过。H4 代码/测试
+提交 `5995efb0f39732b175994cdb7d450e8c2eccf144` 的 run `33281127978` 已在 CI Chromium 执行
+这 3 个合成 E2E；`ba7e247aac0213c85e223bff3238143af16a99f8` 仍仅是 H3 基线证据。
 
 ## 8.8 阶段 6 H1–H3 的本机功能面
 
@@ -385,6 +386,6 @@ Chat、Embedding、ASR、Vision 和 Reranker 的 key 只来自后端 Settings。
 
 Dockerfile 构建 React 后由 FastAPI 托管静态产物，容器启动时执行 SQLite migration。Docker 是 delivery/CI concern，不是本地 prerequisite。`compose.yaml` 已移除。
 
-GitHub Actions 分别执行后端锁定同步、Ruff、pytest、同一临时 SQLite 的 upgrade/downgrade/upgrade，前端 npm ci/typecheck/test/build、Playwright E2E typecheck/Chromium 安装/执行与失败产物上传，以及 Docker build。提交 `ba7e247aac0213c85e223bff3238143af16a99f8` 的四个 H3 基线 jobs 均通过；H4 新增 Playwright fixture 尚未在 CI 执行。本机没有 Docker，所以本地没有把 Docker build 标记为通过。
+GitHub Actions 分别执行后端锁定同步、Ruff、pytest、同一临时 SQLite 的 upgrade/downgrade/upgrade，前端 npm ci/typecheck/test/build、Playwright E2E typecheck/Chromium 安装/执行与失败产物上传，以及 Docker build。提交 `ba7e247aac0213c85e223bff3238143af16a99f8` 的四个 H3 基线 jobs 均通过；H4 代码/测试提交 `5995efb0f39732b175994cdb7d450e8c2eccf144` 的 run `33281127978` 的四个 jobs 也均通过，Playwright job 实际执行了 3 个合成 E2E。本机没有 Docker 或匹配 Chromium，所以本地没有把 Docker build 或真实浏览器执行标记为通过。
 
 组件自动化使用 Vitest + Testing Library + jsdom。真实浏览器 E2E 将由 Playwright CI 或浏览器能力正常的环境执行；当前 runner 故障不阻塞阶段推进，也不记为通过。
