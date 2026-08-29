@@ -235,6 +235,7 @@ test("synthetic review publish search answer and citation flow", async ({ page }
 
   await page.getByRole("button", { name: "收件箱" }).click();
   await expect(page.getByRole("heading", { name: "收件箱" })).toBeVisible();
+  await page.getByRole("button", { name: "Markdown" }).click();
   await page.getByLabel("知识内容").fill(itemBody);
   await page.getByRole("button", { name: "提交到收件箱" }).click();
   await expect(page.getByText("任务状态：succeeded")).toBeVisible();
