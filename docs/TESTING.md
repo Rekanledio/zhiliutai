@@ -1,7 +1,7 @@
 # 测试与验证策略
 
-阶段 6 最终结论为 **PASS WITH NON-BLOCKING RISKS**（Sol 已完成最终复验）。本机 Playwright runner
-未完成测试收集，仍需 CI 或浏览器能力正常的环境确认；这不等同于浏览器测试通过。
+阶段 6 最终结论为 **PASS WITH NON-BLOCKING RISKS**（Sol 已完成最终复验）。Playwright Chromium
+合成闭环已在 GitHub Actions run 33246710524 通过；本机缺少匹配版本浏览器，只登记为本机环境限制。
 
 ## 本地门禁
 
@@ -155,11 +155,11 @@ MCP Provider 的实际入口为 `uv run --directory backend python -m app.mcp.se
 阶段 6 批次 G 使用临时 SQLite、Qdrant、Artifact、Vault、确定性 provider 和受控 MCP memory
 transport，覆盖采集 → JobRunner/Graph 处理 → 人工审核 → 发布到 Obsidian → SQLite/Qdrant
 检索 → 带 Citation 的 SSE 回答 → MCP `search_knowledge`/`get_item` 查询闭环。前端 Playwright
-使用固定 `@playwright/test==1.52.0`、`workers=1`、127.0.0.1 Vite webServer 和浏览器内合成
+使用固定 `@playwright/test==1.53.0`、`workers=1`、127.0.0.1 Vite webServer 和浏览器内合成
 API fixture，覆盖收件箱审核、发布、搜索、证据回答和 Citation UI；失败时保留 trace、screenshot
 和 video。CI 还执行独立 E2E typecheck、Chromium 安装和 Playwright，并上传 `playwright-report`
-与 `test-results`。本机 Playwright runner 在测试收集阶段长时间无输出且未能完成最小用例，已按
-环境限制登记，未将其标记为通过；阶段 6 结论仍为 **PASS WITH NON-BLOCKING RISKS**。
+与 `test-results`。GitHub Actions run 33246710524 的 Playwright Chromium job 已通过；本机未安装
+Playwright 1.53 对应 Chromium，因此本机真实 E2E 仍作为环境限制。阶段 6 结论仍为 **PASS WITH NON-BLOCKING RISKS**。
 测试不访问真实 Vault、网页、视频、模型、密钥或外部 MCP。
 
 阶段 6 批次 G 定向命令：
@@ -215,7 +215,7 @@ npm --prefix frontend run test
 ## 环境能力门禁
 
 - Docker build：GitHub Actions 或具备 Docker 的环境；不要求本机安装 Docker。
-- 真实浏览器自动化：Playwright CI 或浏览器能力正常的环境。当前 automated component verification passed，人工浏览器闭环 passed；本机 Playwright E2E 未完成，等待具备能力的环境确认。
+- 真实浏览器自动化：Playwright Chromium 合成闭环已在 GitHub Actions 通过；人工浏览器闭环 passed。本机缺少 Playwright 1.53 对应 Chromium，不把本机运行写成通过。
 - FFmpeg/yt-dlp：本机未调用真实二进制且不自行安装；阶段 5 使用注入 runner、默认本机
   loopback 安全代理和离线 connector 验证固定 adapter/网络边界，缺失二进制必须返回
   capability/degraded，不得伪装真实工具互操作已经通过。

@@ -63,7 +63,9 @@ npm --prefix frontend run typecheck                   passed
 npm --prefix frontend run test                        20 passed
 npm --prefix frontend run build                       passed
 npm --prefix frontend run e2e:typecheck               passed
-npm --prefix frontend run e2e                         未完成：本机 runner 启动后超过 45 秒无结果，已中断
+npm --prefix frontend run e2e -- --list               passed：发现 1 个测试
+npm --prefix frontend run e2e                         本机环境限制：缺少 Playwright 1.53 Chromium
+GitHub Actions run 33246710524 / playwright            passed：1 个 Chromium 合成闭环测试
 git -c safe.directory=D:/Work/zhiliutai -C D:/Work/zhiliutai diff --check
                                                         passed
 ~~~
@@ -72,11 +74,11 @@ git -c safe.directory=D:/Work/zhiliutai -C D:/Work/zhiliutai diff --check
 
 ## 非阻塞风险与下一步
 
-- 本机 Playwright runner 挂起，需在 CI 或浏览器能力正常的环境执行并确认；未将其写成通过。
+- GitHub Actions 的 Playwright Chromium 闭环已通过；本机仍未安装匹配版本的 Chromium，只登记为本机环境限制。
 - 真实 extractor、yt-dlp、FFmpeg、ASR/Vision/OCR、模型、网页和外部 MCP 互操作未验证；Docker build 也只由 CI/具备 Docker 的环境承担。
 - SQLite、Artifact、Vault、Qdrant 之间不具备跨存储物理事务；恢复后必须显式 rebuild，运行期依赖补偿和权威关系复核。
 - 阶段 4 的 reranker 协议风险和阶段 5 的 HTTPS/真实视频互操作风险继续有效。
-- 下一步仅为 Sol 对本次路径加固和文档收口做快速复验；未宣布无风险，也未开始阶段 7。
+- 阶段 6 已完成收口；未宣布无风险，也未开始阶段 7。
 
 ## Git 与数据边界
 

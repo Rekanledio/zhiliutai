@@ -2,7 +2,7 @@
 
 知流台是单用户、本机优先的个人知识采集、整理、检索和问答工作台。用户确认后的正文唯一写入 Obsidian Markdown；SQLite 保存业务元数据、任务状态与 FTS5 索引；Qdrant Local 保存向量索引；来源与处理产物位于本地 Artifact 目录。
 
-当前阶段：阶段 0–6 已实现；阶段 6 最终结论为 **PASS WITH NON-BLOCKING RISKS**（Sol 已完成最终复验）。现有实现包含两个 LangGraph（IngestionGraph、QuestionAnswerGraph）、HITL/checkpoint、五工具 MCP Provider、显式配置 MCP Consumer、备份/恢复/派生重建和合成端到端闭环。用户确认后的正文仍只写入 Obsidian Markdown；真实模型、网页、视频和外部 MCP 不属于自动化测试。Playwright 测试代码与 CI 门禁已加入，但本机 runner 未完成，实际限制以 `docs/STATUS.md` 为准。
+当前阶段：阶段 0–6 已实现；阶段 6 最终结论为 **PASS WITH NON-BLOCKING RISKS**（Sol 已完成最终复验）。现有实现包含两个 LangGraph（IngestionGraph、QuestionAnswerGraph）、HITL/checkpoint、五工具 MCP Provider、显式配置 MCP Consumer、备份/恢复/派生重建和合成端到端闭环。用户确认后的正文仍只写入 Obsidian Markdown；真实模型、网页、视频和外部 MCP 不属于自动化测试。Playwright 合成闭环已在 GitHub Actions 的 Chromium 环境通过；本机未安装匹配版本的 Playwright Chromium，实际限制以 `docs/STATUS.md` 为准。
 
 ## 本地快速开始
 
