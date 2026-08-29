@@ -13,6 +13,12 @@ from app.db.models import (
     SourceArtifact,
 )
 from app.obsidian.state import watcher_state
+from app.schemas.collections import (
+    CollectionResponse,
+    CollectionSummaryResponse,
+    CollectionUpdateRequest,
+    CollectionWriteRequest,
+)
 from app.schemas.health import DashboardResponse, DashboardStats, HealthResponse
 from app.schemas.stage2 import (
     ItemPatchRequest,
@@ -37,6 +43,91 @@ router = APIRouter(prefix="/api")
 
 def service(request: Request) -> Stage2Service:
     return request.app.state.stage2_service
+
+
+@router.get(
+    "/collections",
+    response_model=list[CollectionSummaryResponse],
+    tags=["collections"],
+)
+async def list_collections(request: Request) -> list[CollectionSummaryResponse]:
+    return await request.app.state.knowledge_service.list_collections()
+
+
+@router.post(
+    "/collections",
+    response_model=CollectionResponse,
+    status_code=201,
+    tags=["collections"],
+)
+async def create_collection(
+    payload: CollectionWriteRequest, request: Request
+) -> CollectionResponse:
+    return await request.app.state.knowledge_service.create_collection(
+        payload.name, payload.description
+    )
+
+
+@router.get(
+    "/collections/{collection_id}",
+    response_model=CollectionResponse,
+    tags=["collections"],
+)
+async def get_collection(
+    collection_id: str, request: Request
+) -> CollectionResponse:
+    return await request.app.state.knowledge_service.get_collection(collection_id)
+
+
+@router.patch(
+    "/collections/{collection_id}",
+    response_model=CollectionResponse,
+    tags=["collections"],
+)
+async def update_collection(
+    collection_id: str,
+    payload: CollectionUpdateRequest,
+    request: Request,
+) -> CollectionResponse:
+    updates: dict[str, object] = {}
+    if "name" in payload.model_fields_set:
+        updates["name"] = payload.name
+    if "description" in payload.model_fields_set:
+        updates["description"] = payload.description
+    return await request.app.state.knowledge_service.update_collection(
+        collection_id, **updates
+    )
+
+
+@router.delete("/collections/{collection_id}", status_code=204, tags=["collections"])
+async def delete_collection(collection_id: str, request: Request) -> None:
+    await request.app.state.knowledge_service.delete_collection(collection_id)
+
+
+@router.post(
+    "/collections/{collection_id}/items/{item_id}",
+    response_model=CollectionResponse,
+    tags=["collections"],
+)
+async def add_collection_item(
+    collection_id: str, item_id: str, request: Request
+) -> CollectionResponse:
+    return await request.app.state.knowledge_service.add_collection_item(
+        collection_id, item_id
+    )
+
+
+@router.delete(
+    "/collections/{collection_id}/items/{item_id}",
+    response_model=CollectionResponse,
+    tags=["collections"],
+)
+async def remove_collection_item(
+    collection_id: str, item_id: str, request: Request
+) -> CollectionResponse:
+    return await request.app.state.knowledge_service.remove_collection_item(
+        collection_id, item_id
+    )
 
 
 def job_out(job: ProcessingJob) -> JobResponse:

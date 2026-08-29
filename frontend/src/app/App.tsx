@@ -9,6 +9,7 @@ import {
 import { InboxPage } from "../features/inbox/InboxPage";
 import { JobsPage } from "../features/jobs/JobsPage";
 import { KnowledgePage } from "../features/knowledge/KnowledgePage";
+import { CollectionsPage } from "../features/collections/CollectionsPage";
 import { SearchPage } from "../features/search/SearchPage";
 import "../styles/global.css";
 
@@ -421,6 +422,8 @@ export default function App() {
           <JobsPage />
         ) : activePage === "search" ? (
           <SearchPage />
+        ) : activePage === "collections" ? (
+          <CollectionsPage />
         ) : (
           <PlaceholderPage item={activeItem} />
         )}

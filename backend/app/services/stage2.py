@@ -2,17 +2,22 @@ import asyncio
 import json
 import structlog
 import time
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
 from app.core.errors import ApplicationError
+from app.core.safety import redact_sensitive_text
 from app.db.models import (
+    Collection,
+    CollectionItem,
     ContentVersion,
     KnowledgeItem,
     NoteBinding,
@@ -40,6 +45,7 @@ from app.services.content import content_hash, default_title, normalize_content
 from app.services.indexing import IndexService
 from app.services.video import VideoService
 from app.services.vector_store import QdrantLocalStore
+from app.schemas.collections import normalize_collection_names
 
 
 logger = structlog.get_logger("stage2")
@@ -637,6 +643,7 @@ class Stage2Service:
             )
         next_title = (title or item.title)[:300]
         next_body = normalize_content(body if body is not None else disk_note.body)
+        collections = await self._collection_names(session, item.id)
         raw = render_note(
             zhiliu_id=binding.zhiliu_id,
             source_type=item.source_type,
@@ -646,6 +653,7 @@ class Stage2Service:
             created_at=item.created_at,
             updated_at=datetime.now(timezone.utc),
             tags=[str(tag) for tag in disk_note.metadata.get("tags", []) if isinstance(tag, str)],
+            collections=collections,
             source_url=self._source_url(current.source_metadata_json),
         )
         vault.atomic_write(binding.relative_path, raw)
@@ -705,6 +713,7 @@ class Stage2Service:
                 if item.status not in {"reviewed", "published"}:
                     raise ApplicationError(409, "invalid_item_state", "条目必须先审核再发布")
                 current = await self._version(session, item)
+                collections = await self._collection_names(session, item.id)
                 binding_result = await session.execute(
                     select(NoteBinding).where(NoteBinding.knowledge_item_id == item.id)
                 )
@@ -723,6 +732,7 @@ class Stage2Service:
                     created_at=item.created_at,
                     updated_at=datetime.now(timezone.utc),
                     tags=json.loads(current.suggested_tags_json),
+                    collections=collections,
                     source_url=self._source_url(current.source_metadata_json),
                 )
 
@@ -810,6 +820,179 @@ class Stage2Service:
             raise
 
     @staticmethod
+    async def _collection_names(
+        session: AsyncSession, item_id: str
+    ) -> list[str]:
+        result = await session.execute(
+            select(Collection.name)
+            .join(CollectionItem, CollectionItem.collection_id == Collection.id)
+            .where(CollectionItem.knowledge_item_id == item_id)
+            .order_by(func.lower(Collection.name), Collection.name)
+        )
+        try:
+            return normalize_collection_names([name for name in result.scalars() if isinstance(name, str)])
+        except ValueError as error:
+            raise ApplicationError(
+                409,
+                "collection_invalid_state",
+                "合集关系包含不允许的内容",
+            ) from error
+
+    async def stage_collection_note(
+        self,
+        session: AsyncSession,
+        item: KnowledgeItem,
+        collection_names: Sequence[str],
+        *,
+        skip_if_unchanged: bool = False,
+    ) -> tuple[ObsidianVault, StagedWrite | None, bytes, str]:
+        """Stage a collection-only note rewrite without creating a content version."""
+
+        if (
+            item.status != "published"
+            or not item.current_content_version_id
+        ):
+            raise ApplicationError(409, "collection_item_invalid", "条目当前不可加入合集")
+        binding_result = await session.execute(
+            select(NoteBinding).where(NoteBinding.knowledge_item_id == item.id)
+        )
+        binding = binding_result.scalar_one_or_none()
+        if binding is None:
+            raise ApplicationError(409, "note_binding_missing", "发布条目缺少笔记绑定")
+        current = await session.get(ContentVersion, item.current_content_version_id)
+        if current is None or current.knowledge_item_id != item.id:
+            raise ApplicationError(409, "content_version_invalid", "当前内容版本无效")
+        vault = self.vault()
+        try:
+            disk_note = vault.read(binding.relative_path)
+            old_raw = vault.read_bytes(binding.relative_path)
+        except (OSError, ValueError) as error:
+            raise ApplicationError(
+                409,
+                "collection_note_unavailable",
+                "受管理 Markdown 当前不可更新",
+            ) from error
+        disk_hash = content_hash(disk_note.body)
+        if disk_hash != binding.content_hash:
+            raise ApplicationError(
+                409,
+                "content_conflict",
+                "Obsidian 内容已变化，请重新扫描后再修改合集",
+            )
+        try:
+            tags = self._frontmatter_tags(disk_note.metadata)
+            disk_collections = normalize_collection_names(
+                disk_note.metadata.get("collections", [])
+            )
+            desired_collections = normalize_collection_names(list(collection_names))
+            source_url = self._frontmatter_source_url(
+                disk_note.metadata,
+                self._source_url(current.source_metadata_json),
+            )
+        except ValueError as error:
+            raise ApplicationError(
+                409,
+                "collection_note_unavailable",
+                "受管理 Markdown Frontmatter 无效",
+            ) from error
+        if (
+            skip_if_unchanged
+            and len(disk_collections) == len(desired_collections)
+            and {name.casefold() for name in disk_collections}
+            == {name.casefold() for name in desired_collections}
+        ):
+            return vault, None, old_raw, binding.relative_path
+        title = (
+            disk_note.metadata["title"]
+            if isinstance(disk_note.metadata.get("title"), str)
+            else current.title
+        )
+        raw = render_note(
+            zhiliu_id=binding.zhiliu_id,
+            source_type=item.source_type,
+            title=title,
+            body=disk_note.body,
+            status="reviewed",
+            created_at=item.created_at,
+            updated_at=datetime.now(timezone.utc),
+            tags=tags,
+            collections=desired_collections,
+            source_url=source_url,
+        )
+        try:
+            staged = vault.stage_write(binding.relative_path, raw)
+        except (OSError, ValueError) as error:
+            raise ApplicationError(
+                409,
+                "collection_note_unavailable",
+                "受管理 Markdown 当前不可更新",
+            ) from error
+        return vault, staged, old_raw, binding.relative_path
+
+    async def _collection_ids_for_names(
+        self, session: AsyncSession, collection_names: Sequence[str]
+    ) -> set[str]:
+        normalized_names = normalize_collection_names(list(collection_names))
+        folded_names = {name.casefold() for name in normalized_names}
+        if not folded_names:
+            return set()
+        result = await session.execute(
+            select(Collection.id, Collection.name).where(
+                func.lower(Collection.name).in_(folded_names)
+            )
+        )
+        matches: dict[str, str] = {}
+        for collection_id, name in result.all():
+            if not isinstance(name, str):
+                continue
+            folded = name.casefold()
+            if folded in matches and matches[folded] != collection_id:
+                raise ValueError("Markdown 合集同步冲突")
+            matches[folded] = collection_id
+        for name in normalized_names:
+            folded = name.casefold()
+            if folded in matches:
+                continue
+            collection = Collection(name=name, description=None)
+            try:
+                async with session.begin_nested():
+                    session.add(collection)
+                    await session.flush()
+            except IntegrityError:
+                existing = await session.execute(
+                    select(Collection.id, Collection.name).where(
+                        func.lower(Collection.name) == folded
+                    )
+                )
+                row = existing.first()
+                if row is None or not isinstance(row.name, str):
+                    raise ValueError("Markdown 合集同步冲突")
+                matches[row.name.casefold()] = row.id
+            else:
+                matches[folded] = collection.id
+        return set(matches.values())
+
+    @staticmethod
+    async def _replace_collection_relations(
+        session: AsyncSession, item_id: str, desired_ids: set[str]
+    ) -> None:
+        result = await session.execute(
+            select(CollectionItem).where(CollectionItem.knowledge_item_id == item_id)
+        )
+        existing = list(result.scalars())
+        existing_ids = {relation.collection_id for relation in existing}
+        for relation in existing:
+            if relation.collection_id not in desired_ids:
+                await session.delete(relation)
+        for collection_id in desired_ids - existing_ids:
+            session.add(
+                CollectionItem(
+                    collection_id=collection_id,
+                    knowledge_item_id=item_id,
+                )
+            )
+
+    @staticmethod
     def _source_url(source_metadata_json: str) -> str | None:
         try:
             metadata = json.loads(source_metadata_json or "{}")
@@ -817,6 +1000,40 @@ class Stage2Service:
             return None
         value = metadata.get("url") if isinstance(metadata, dict) else None
         return value if isinstance(value, str) else None
+
+    @staticmethod
+    def _frontmatter_tags(metadata: dict[str, object]) -> list[str]:
+        values = metadata.get("tags", [])
+        if not isinstance(values, list) or len(values) > 50:
+            raise ValueError("Frontmatter 标签无效")
+        tags: list[str] = []
+        for value in values:
+            if (
+                not isinstance(value, str)
+                or not value
+                or len(value) > 80
+                or any(ord(character) < 32 or ord(character) == 127 for character in value)
+                or redact_sensitive_text(value) != value
+            ):
+                raise ValueError("Frontmatter 标签无效")
+            tags.append(value)
+        return tags
+
+    @staticmethod
+    def _frontmatter_source_url(
+        metadata: dict[str, object], fallback: str | None
+    ) -> str | None:
+        value = metadata.get("source_url", fallback)
+        if value is None:
+            return None
+        if (
+            not isinstance(value, str)
+            or len(value) > 2048
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+            or redact_sensitive_text(value) != value
+        ):
+            raise ValueError("Frontmatter 来源无效")
+        return value or None
 
     @staticmethod
     def _vault_source_metadata(
@@ -977,6 +1194,33 @@ class Stage2Service:
                 note = note_object
                 if item is None:
                     continue
+                try:
+                    collection_names = normalize_collection_names(
+                        note.metadata.get("collections", [])
+                    )
+                    if (
+                        item.deleted_at is None
+                        and item.status == "published"
+                        and item.current_content_version_id
+                    ):
+                        current = await session.get(
+                            ContentVersion, item.current_content_version_id
+                        )
+                        if current is None or current.knowledge_item_id != item.id:
+                            raise ValueError("Markdown 合集引用无效")
+                        collection_ids = await self._collection_ids_for_names(
+                            session, collection_names
+                        )
+                    elif collection_names:
+                        raise ValueError("Markdown 合集引用无效")
+                    else:
+                        collection_ids = set()
+                except ValueError:
+                    invalid += 1
+                    if binding:
+                        binding.sync_state = "error"
+                        binding.last_error = "Markdown 合集 Frontmatter 无效"
+                    continue
                 if binding is None:
                     binding = NoteBinding(
                         knowledge_item_id=item.id,
@@ -1009,6 +1253,14 @@ class Stage2Service:
                 else:
                     binding.sync_state = "synced"
                     binding.last_synced_at = datetime.now(timezone.utc)
+                if (
+                    item.deleted_at is None
+                    and item.status == "published"
+                    and item.current_content_version_id
+                ):
+                    await self._replace_collection_relations(
+                        session, item.id, collection_ids
+                    )
             for binding in bindings:
                 if binding.zhiliu_id not in found:
                     if binding.relative_path in present_relative_paths:

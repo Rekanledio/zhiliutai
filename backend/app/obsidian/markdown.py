@@ -44,6 +44,7 @@ def render_note(
     created_at: datetime,
     updated_at: datetime,
     tags: list[str] | None = None,
+    collections: list[str] | None = None,
     source_url: str | None = None,
 ) -> str:
     lines = [
@@ -63,6 +64,9 @@ def render_note(
         ]
     )
     lines.extend(f"  - {_scalar(tag)}" for tag in (tags or []))
+    if collections is not None:
+        lines.append("collections:")
+        lines.extend(f"  - {_scalar(collection)}" for collection in collections)
     lines.extend(["---", "", normalize_content(body).rstrip(), ""])
     return "\n".join(lines)
 

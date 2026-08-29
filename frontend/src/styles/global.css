@@ -1358,6 +1358,362 @@ p {
   font-size: 11px;
 }
 
+.collection-boundary-note {
+  display: grid;
+  gap: 4px;
+  max-width: 280px;
+  padding: 11px 13px;
+  border: 1px solid #dce9df;
+  border-radius: 12px;
+  color: #68816f;
+  background: rgba(232, 242, 234, 0.62);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.collection-boundary-note strong {
+  color: #4f7d63;
+  font-size: 11px;
+}
+
+.collections-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.72fr) minmax(0, 1.55fr);
+  align-items: start;
+  gap: 15px;
+  margin-top: 15px;
+}
+
+.collection-panel,
+.collection-detail-panel,
+.collection-members-card,
+.collection-tags-card {
+  min-width: 0;
+  border: 1px solid rgba(232, 229, 220, 0.95);
+  border-radius: 18px;
+  background: rgba(255, 253, 249, 0.9);
+  box-shadow: var(--shadow);
+}
+
+.collection-panel {
+  overflow: hidden;
+}
+
+.collection-panel-heading,
+.collection-detail-heading,
+.collection-section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.collection-panel-heading {
+  padding: 19px 20px 15px;
+}
+
+.collection-panel-heading h2,
+.collection-detail-heading h2 {
+  margin-top: 4px;
+  color: var(--ink);
+  font-family: Georgia, "Songti SC", "STSong", serif;
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: -0.04em;
+}
+
+.collection-count {
+  display: grid;
+  min-width: 25px;
+  height: 25px;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--teal);
+  background: var(--teal-wash);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.collection-create-form,
+.collection-edit-form {
+  display: grid;
+  gap: 7px;
+}
+
+.collection-create-form {
+  margin: 0 20px 17px;
+  padding-top: 15px;
+  border-top: 1px solid #eff0ea;
+}
+
+.collection-create-form label,
+.collection-edit-form label {
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.collection-create-form input,
+.collection-create-form textarea,
+.collection-edit-form input,
+.collection-edit-form textarea,
+.collection-add-row select {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  outline: none;
+  padding: 9px 10px;
+  color: var(--ink);
+  background: #fffefa;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.collection-create-form textarea,
+.collection-edit-form textarea {
+  resize: vertical;
+}
+
+.collection-create-form input:focus,
+.collection-create-form textarea:focus,
+.collection-edit-form input:focus,
+.collection-edit-form textarea:focus,
+.collection-add-row select:focus {
+  border-color: #9fc6b7;
+  box-shadow: 0 0 0 3px rgba(31, 101, 95, 0.08);
+}
+
+.collection-create-form button {
+  justify-self: start;
+  margin-top: 4px;
+}
+
+.collection-list {
+  display: grid;
+  gap: 2px;
+  padding: 0 9px 10px;
+}
+
+.collection-list-item {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px;
+  border-radius: 10px;
+  color: var(--ink-soft);
+  background: transparent;
+  text-align: left;
+}
+
+.collection-list-item:hover,
+.collection-list-item.is-selected {
+  color: var(--teal);
+  background: var(--teal-wash);
+}
+
+.collection-list-item > span:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.collection-list-item strong,
+.collection-list-item small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collection-list-item strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.collection-list-item small {
+  color: #9ba7a1;
+  font-size: 10px;
+}
+
+.collection-detail-panel {
+  display: grid;
+  gap: 15px;
+  padding: 22px;
+}
+
+.collection-detail-heading p {
+  margin-top: 8px;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.collection-moc-status {
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  border: 1px solid #e8e4da;
+  border-radius: 999px;
+  color: #9a8a76;
+  background: #f7f1e7;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.collection-form-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 10px;
+}
+
+.collection-form-grid label {
+  display: grid;
+  gap: 6px;
+}
+
+.collection-edit-form .form-actions {
+  margin-top: 4px;
+}
+
+.danger-button {
+  color: #984f43;
+}
+
+.collection-members-card,
+.collection-tags-card {
+  padding: 17px 18px;
+  box-shadow: none;
+}
+
+.collection-section-heading {
+  align-items: flex-end;
+}
+
+.collection-section-heading h3 {
+  margin-top: 4px;
+  color: var(--ink);
+  font-family: Georgia, "Songti SC", "STSong", serif;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.collection-section-heading h3 small {
+  color: #a0aaa4;
+  font-family: inherit;
+  font-size: 11px;
+}
+
+.collection-add-row {
+  display: flex;
+  min-width: min(330px, 50%);
+  gap: 7px;
+}
+
+.collection-add-row select {
+  flex: 1;
+  min-width: 0;
+}
+
+.collection-add-row .primary-button {
+  flex: 0 0 auto;
+}
+
+.collection-member-list {
+  display: grid;
+  margin-top: 13px;
+}
+
+.collection-member-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 0;
+  border-top: 1px solid #eff0ea;
+}
+
+.collection-member-row > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.collection-member-row strong {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.collection-member-row span,
+.collection-member-row small,
+.collection-tags-card p {
+  color: #9ba7a1;
+  font-size: 10px;
+}
+
+.collection-member-row small {
+  overflow-wrap: anywhere;
+}
+
+.collection-tags-card {
+  display: grid;
+  gap: 9px;
+}
+
+.collection-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.collection-tag-list span {
+  padding: 5px 8px;
+  border-radius: 999px;
+  color: var(--teal);
+  background: var(--teal-wash);
+  font-size: 10px;
+}
+
+.collection-empty-state {
+  display: flex;
+  min-height: 380px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-soft);
+  text-align: center;
+}
+
+.collection-empty-state .placeholder-icon {
+  margin-bottom: 15px;
+}
+
+.collection-empty-state strong {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.collection-empty-state p {
+  max-width: 300px;
+  margin-top: 8px;
+  color: #9ba7a1;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .toast {
   position: fixed;
   z-index: 10;
@@ -1645,5 +2001,40 @@ p {
   .knowledge-row {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .collection-boundary-note {
+    max-width: none;
+    width: 100%;
+  }
+
+  .collections-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .collection-detail-panel {
+    padding: 18px;
+  }
+
+  .collection-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .collection-section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .collection-add-row {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .collection-member-row {
+    align-items: flex-start;
+  }
+
+  .collection-member-row .text-button {
+    flex: 0 0 auto;
   }
 }

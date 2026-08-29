@@ -56,6 +56,28 @@ export interface KnowledgeItem {
   updated_at: string;
 }
 
+export interface CollectionItem {
+  id: string;
+  title: string;
+  source_type: string;
+  version_no: number;
+  suggested_tags: string[];
+}
+
+export interface CollectionSummary {
+  id: string;
+  name: string;
+  description?: string | null;
+  item_count: number;
+  moc_enabled: boolean;
+}
+
+export interface Collection extends CollectionSummary {
+  items: CollectionItem[];
+  related_tags: string[];
+  moc_status: "not_enabled";
+}
+
 export interface ProcessingJob {
   id: string;
   kind: string;
@@ -710,4 +732,60 @@ export function rescanObsidian(): Promise<Record<string, number>> {
 
 export function openObsidian(id: string): Promise<{ uri: string }> {
   return requestJson("/api/obsidian/open/" + id, { method: "POST" });
+}
+
+function collectionPath(id: string): string {
+  return "/api/collections/" + encodeURIComponent(id);
+}
+
+export function getCollections(signal?: AbortSignal): Promise<CollectionSummary[]> {
+  return requestJson("/api/collections", { signal });
+}
+
+export function getCollection(id: string, signal?: AbortSignal): Promise<Collection> {
+  return requestJson(collectionPath(id), { signal });
+}
+
+export function createCollection(
+  name: string,
+  description?: string,
+): Promise<Collection> {
+  return requestJson("/api/collections", {
+    method: "POST",
+    body: JSON.stringify({ name, description: description || null }),
+  });
+}
+
+export function updateCollection(
+  id: string,
+  updates: { name?: string; description?: string | null },
+): Promise<Collection> {
+  return requestJson(collectionPath(id), {
+    method: "PATCH",
+    body: JSON.stringify(updates),
+  });
+}
+
+export function deleteCollection(id: string): Promise<void> {
+  return requestJson(collectionPath(id), { method: "DELETE" });
+}
+
+export function addCollectionItem(
+  collectionId: string,
+  itemId: string,
+): Promise<Collection> {
+  return requestJson(
+    collectionPath(collectionId) + "/items/" + encodeURIComponent(itemId),
+    { method: "POST" },
+  );
+}
+
+export function removeCollectionItem(
+  collectionId: string,
+  itemId: string,
+): Promise<Collection> {
+  return requestJson(
+    collectionPath(collectionId) + "/items/" + encodeURIComponent(itemId),
+    { method: "DELETE" },
+  );
 }
