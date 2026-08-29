@@ -11,6 +11,7 @@ import { JobsPage } from "../features/jobs/JobsPage";
 import { KnowledgePage } from "../features/knowledge/KnowledgePage";
 import { CollectionsPage } from "../features/collections/CollectionsPage";
 import { SearchPage } from "../features/search/SearchPage";
+import { SettingsPage } from "../features/settings/SettingsPage";
 import "../styles/global.css";
 
 type PageKey =
@@ -424,6 +425,8 @@ export default function App() {
           <SearchPage />
         ) : activePage === "collections" ? (
           <CollectionsPage />
+        ) : activePage === "settings" ? (
+          <SettingsPage />
         ) : (
           <PlaceholderPage item={activeItem} />
         )}

@@ -33,8 +33,10 @@ logs/
 # User data, artifacts, vaults, and database volumes
 data/artifacts/*
 !data/artifacts/.gitkeep
+data/backups/
 data/qdrant/
 data/models/
+data/backups/
 data/zhiliutai.db*
 data/vaults/*
 !data/vaults/.gitkeep

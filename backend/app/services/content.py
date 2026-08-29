@@ -2,6 +2,9 @@ import hashlib
 import re
 
 
+DEFAULT_CHUNK_MAX_CHARS = 800
+
+
 def normalize_content(content: str) -> str:
     normalized = content.replace("\r\n", "\n").replace("\r", "\n")
     normalized = "\n".join(line.rstrip() for line in normalized.split("\n"))
@@ -23,7 +26,7 @@ def default_title(content: str) -> str:
     return (first[:80] or "未命名知识").strip()
 
 
-def chunk_content(content: str, max_chars: int = 800) -> list[str]:
+def chunk_content(content: str, max_chars: int = DEFAULT_CHUNK_MAX_CHARS) -> list[str]:
     text = normalize_content(content)
     paragraphs = [part.strip() for part in re.split(r"\n{2,}", text) if part.strip()]
     chunks: list[str] = []

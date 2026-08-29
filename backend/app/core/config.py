@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     sqlite_busy_timeout_ms: int = 5000
     workflow_checkpoint_path: Path = PROJECT_ROOT / "data" / "checkpoints" / "workflows.db"
     qdrant_path: Path = PROJECT_ROOT / "data" / "qdrant"
+    backup_root: Path = PROJECT_ROOT / "data" / "backups"
 
     vault_path: str | None = None
     managed_vault_dir: str = "知流台"
@@ -97,6 +98,7 @@ class Settings(BaseSettings):
         "qdrant_path",
         "embedding_cache_path",
         "workflow_checkpoint_path",
+        "backup_root",
         mode="before",
     )
     @classmethod

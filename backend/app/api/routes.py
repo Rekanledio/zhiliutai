@@ -1,7 +1,8 @@
 import json
 from datetime import datetime
+from uuid import uuid4
 
-from fastapi import APIRouter, File, Form, Request, UploadFile
+from fastapi import APIRouter, Body, File, Form, Request, UploadFile
 from sqlalchemy import func, select
 
 from app.core.errors import ApplicationError
@@ -20,6 +21,13 @@ from app.schemas.collections import (
     CollectionWriteRequest,
 )
 from app.schemas.health import DashboardResponse, DashboardStats, HealthResponse
+from app.schemas.settings import (
+    MaintenanceRequest,
+    SettingsBackupResponse,
+    SettingsRebuildResponse,
+    SettingsRescanResponse,
+    SettingsResponse,
+)
 from app.schemas.stage2 import (
     ItemPatchRequest,
     ItemResponse,
@@ -27,7 +35,6 @@ from app.schemas.stage2 import (
     ObsidianOpenResponse,
     ObsidianStatusResponse,
     PublishRequest,
-    RescanResponse,
     ReviewRequest,
     SubmissionResponse,
     TextSourceRequest,
@@ -35,6 +42,9 @@ from app.schemas.stage2 import (
 )
 from app.schemas.video import VideoSourceRequest
 from app.services.health import build_health_report
+from app.services.backup import BackupError
+from app.services.maintenance import MaintenanceBusyError
+from app.services.settings import build_settings_response
 from app.services.stage2 import Stage2Service
 from app.workflows.contracts import IngestionResumeDecision
 
@@ -43,6 +53,110 @@ router = APIRouter(prefix="/api")
 
 def service(request: Request) -> Stage2Service:
     return request.app.state.stage2_service
+
+
+def _backup_application_error(error: BackupError) -> ApplicationError:
+    errors = {
+        "vault_not_configured": (
+            409,
+            "vault_not_configured",
+            "尚未配置 Obsidian Vault，无法执行此操作",
+        ),
+        "database_missing": (503, "database_unavailable", "业务数据库尚不可用"),
+        "schema_incompatible": (503, "database_incompatible", "业务数据库版本不兼容"),
+        "embedding_not_configured": (
+            503,
+            "embedding_not_configured",
+            "Embedding 尚未配置，无法重建派生索引",
+        ),
+        "artifact_state_invalid": (503, "derived_state_invalid", "Artifact 状态无法验证"),
+        "vault_state_invalid": (503, "derived_state_invalid", "Obsidian 状态无法验证"),
+        "backup_target_exists": (503, "backup_target_exists", "备份目标已存在，请稍后重试"),
+    }
+    status_code, code, message = errors.get(
+        error.code,
+        (503, "maintenance_failed", "维护操作未完成"),
+    )
+    return ApplicationError(status_code, code, message)
+
+
+def _maintenance_busy_error() -> ApplicationError:
+    return ApplicationError(409, "maintenance_busy", "已有维护操作正在执行")
+
+
+async def _rescan_with_maintenance(request: Request) -> SettingsRescanResponse:
+    try:
+        result = await request.app.state.maintenance_service.rescan(wait_if_busy=True)
+    except MaintenanceBusyError as error:
+        raise _maintenance_busy_error() from error
+    assert result is not None
+    return SettingsRescanResponse(**result)
+
+
+@router.get("/settings", response_model=SettingsResponse, tags=["system"])
+async def settings(request: Request) -> SettingsResponse:
+    return build_settings_response(
+        request.app.state.settings,
+        embedding_provider=request.app.state.embedding_provider,
+    )
+
+
+@router.post(
+    "/settings/rescan",
+    response_model=SettingsRescanResponse,
+    tags=["system"],
+)
+async def settings_rescan(
+    request: Request,
+    _payload: MaintenanceRequest | None = Body(default=None),
+) -> SettingsRescanResponse:
+    return await _rescan_with_maintenance(request)
+
+
+@router.post(
+    "/settings/rebuild",
+    response_model=SettingsRebuildResponse,
+    tags=["system"],
+)
+async def settings_rebuild(
+    request: Request,
+    _payload: MaintenanceRequest | None = Body(default=None),
+) -> SettingsRebuildResponse:
+    try:
+        result = await request.app.state.maintenance_service.rebuild()
+    except MaintenanceBusyError as error:
+        raise _maintenance_busy_error() from error
+    except BackupError as error:
+        raise _backup_application_error(error) from error
+    return SettingsRebuildResponse(
+        published_items=result.published_items,
+        chunks=result.chunks,
+    )
+
+
+@router.post(
+    "/settings/backup",
+    response_model=SettingsBackupResponse,
+    status_code=201,
+    tags=["system"],
+)
+async def settings_backup(
+    request: Request,
+    _payload: MaintenanceRequest | None = Body(default=None),
+) -> SettingsBackupResponse:
+    archive_id = f"backup-{uuid4().hex}"
+    destination = request.app.state.settings.backup_root / f"{archive_id}.zip"
+    try:
+        result = await request.app.state.maintenance_service.backup(destination)
+    except MaintenanceBusyError as error:
+        raise _maintenance_busy_error() from error
+    except BackupError as error:
+        raise _backup_application_error(error) from error
+    return SettingsBackupResponse(
+        archive_id=archive_id,
+        created_at=result.manifest.created_at,
+        sha256=result.archive_sha256,
+    )
 
 
 @router.get(
@@ -535,9 +649,9 @@ async def obsidian_status(request: Request) -> ObsidianStatusResponse:
     )
 
 
-@router.post("/obsidian/rescan", response_model=RescanResponse, tags=["obsidian"])
-async def rescan_obsidian(request: Request) -> RescanResponse:
-    return RescanResponse(**(await service(request).rescan()))
+@router.post("/obsidian/rescan", response_model=SettingsRescanResponse, tags=["obsidian"])
+async def rescan_obsidian(request: Request) -> SettingsRescanResponse:
+    return await _rescan_with_maintenance(request)
 
 
 @router.post(

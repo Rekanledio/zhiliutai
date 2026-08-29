@@ -42,8 +42,10 @@ from app.rag.citations import CitationBuilder
 from app.rag.question_answer import QuestionAnswerService
 from app.rag.reranking import RerankerProvider
 from app.rag.retrieval import HybridRetriever
+from app.services.backup import BackupRestoreService
 from app.services.jobs import JobRunner
 from app.services.knowledge import KnowledgeApplicationService
+from app.services.maintenance import MaintenanceCoordinator
 from app.services.stage2 import Stage2Service
 from app.workflows.production import (
     IngestionWorkflowCoordinator,
@@ -62,15 +64,23 @@ def normalize_request_id(value: str | None) -> str:
     return uuid4().hex
 
 
-async def watcher_loop(stage2: Stage2Service, interval: float) -> None:
+async def watcher_loop(
+    stage2: Stage2Service,
+    interval: float,
+    maintenance: MaintenanceCoordinator,
+) -> None:
     watcher_state.running = True
     watcher_state.last_error = None
     try:
         while True:
             try:
-                await stage2.rescan(minimum_file_age_seconds=max(interval * 2, 0.25))
-                watcher_state.last_heartbeat_at = datetime.now(timezone.utc)
-                watcher_state.last_error = None
+                result = await maintenance.rescan(
+                    minimum_file_age_seconds=max(interval * 2, 0.25),
+                    skip_if_busy=True,
+                )
+                if result is not None:
+                    watcher_state.last_heartbeat_at = datetime.now(timezone.utc)
+                    watcher_state.last_error = None
             except Exception as error:
                 watcher_state.last_error = type(error).__name__
             await asyncio.sleep(interval)
@@ -152,6 +162,12 @@ def create_app(
         citation_builder,
         session_factory,
     )
+    backup_service = BackupRestoreService(
+        resolved_settings,
+        session_factory,
+        embedding_provider,
+    )
+    maintenance_service = MaintenanceCoordinator(stage2, backup_service)
     ingestion_workflow_services = Stage2IngestionWorkflowServices(stage2, session_factory)
     question_answer_workflow_services = ProductionQuestionAnswerWorkflowServices(
         question_answer_service
@@ -203,6 +219,7 @@ def create_app(
                                 watcher_loop(
                                     stage2,
                                     resolved_settings.obsidian_watch_interval_seconds,
+                                    maintenance_service,
                                 )
                             )
                         )
@@ -239,6 +256,9 @@ def create_app(
     app.state.rag_chat_provider = rag_chat_provider
     app.state.question_answer_service = question_answer_service
     app.state.knowledge_service = knowledge_service
+    app.state.embedding_provider = embedding_provider
+    app.state.backup_service = backup_service
+    app.state.maintenance_service = maintenance_service
     app.state.workflow_runtime = workflow_runtime
     app.state.ingestion_workflow = ingestion_workflow
     app.state.question_answer_workflow = question_answer_workflow

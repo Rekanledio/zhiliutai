@@ -44,6 +44,78 @@ const dashboardResponse = {
   processing_jobs: [],
 };
 
+const settingsResponse = {
+  local_only: true,
+  bind_host: "127.0.0.1",
+  vault: {
+    configured: true,
+    managed_directory: "知流台",
+    watcher_running: true,
+    sync_state: "watching",
+  },
+  providers: {
+    chat: {
+      capability: "chat",
+      provider_kind: "openai-compatible",
+      configured: false,
+      credential_configured: false,
+      model: null,
+    },
+    embedding: {
+      capability: "embedding",
+      provider_kind: "fastembed",
+      configured: true,
+      credential_configured: false,
+      model: "synthetic-embedding",
+    },
+    asr: {
+      capability: "asr",
+      provider_kind: "openai-compatible",
+      configured: false,
+      credential_configured: false,
+      model: null,
+    },
+    vision: {
+      capability: "vision",
+      provider_kind: "openai-compatible",
+      configured: false,
+      credential_configured: false,
+      model: null,
+    },
+    reranker: {
+      capability: "reranker",
+      provider_kind: "openai-compatible",
+      configured: false,
+      credential_configured: false,
+      model: null,
+    },
+  },
+  retrieval: {
+    rag_query_max_chars: 2000,
+    rrf_k: 60,
+    fts_limit: 30,
+    vector_limit: 30,
+    threshold: 0.35,
+    confident_rank: 3,
+    rerank_limit: 20,
+  },
+  chunking: { strategy: "paragraph_then_fixed_width", max_chars: 800 },
+  video: {
+    retention_policy: "delete_after_processing",
+    retention_days: 7,
+    max_bytes: 500000000,
+    max_duration_seconds: 14400,
+    ffmpeg_state: "not_configured",
+  },
+  maintenance: {
+    backup_available: true,
+    rescan_available: true,
+    rebuild_available: true,
+    configuration_hint: "配置通过项目根目录 .env，重启后生效；API Key 仅在后端秘密配置中使用。",
+    restore_note: "恢复必须先停止服务，再按文档化离线 CLI 执行；设置页不提供在线恢复。",
+  },
+};
+
 const baseItem = {
   id: "item-1",
   title: "阶段 2 草稿",
@@ -75,6 +147,7 @@ function appFetch(overrides = {}) {
   return vi.fn(async (url, init = {}) => {
     const method = init.method ?? "GET";
     if (url === "/api/dashboard") return responseWith(dashboardResponse);
+    if (url === "/api/settings") return responseWith(settingsResponse);
     if (url === "/api/items" || String(url).startsWith("/api/items?")) {
       return responseWith(items);
     }
@@ -162,7 +235,7 @@ describe("阶段 1/2 React 工作台", () => {
     }
   });
 
-  test("展示七项导航并切换阶段 2 与占位页面", async () => {
+  test("展示七项导航并切换阶段 2 与设置页面", async () => {
     vi.stubGlobal("fetch", appFetch());
     render(createElement(App));
     await screen.findByRole("heading", { level: 1, name: "测试问候，先整理一点点" });
@@ -175,8 +248,9 @@ describe("阶段 1/2 React 工作台", () => {
       fireEvent.click(within(navigation).getByRole("button", { name: new RegExp("^" + label) }));
       expect(await screen.findByRole("heading", { level: 1, name: label })).toBeTruthy();
     }
-    expect(screen.getByText("页面入口已经保留，相关功能正在本轮补齐。")).toBeTruthy();
-    expect(screen.getByText("功能正在补齐")).toBeTruthy();
+    expect(screen.getByText("这里只观察安全配置并执行受控维护；API Key 不会返回到前端。")).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 2, name: "模型能力" })).toBeTruthy();
+    expect(screen.queryByText("页面入口已经保留，相关功能正在本轮补齐。")).toBeNull();
     expect(screen.queryByText(/阶段 4/)).toBeNull();
   });
 

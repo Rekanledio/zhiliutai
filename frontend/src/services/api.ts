@@ -100,6 +100,82 @@ export interface ObsidianStatus {
   last_error?: string | null;
 }
 
+export type SettingsHealthState = HealthState;
+
+export interface ProviderSettings {
+  capability: "chat" | "embedding" | "asr" | "vision" | "reranker";
+  provider_kind: "openai-compatible" | "fastembed";
+  configured: boolean;
+  credential_configured: boolean;
+  model: string | null;
+}
+
+export interface SettingsResponse {
+  local_only: boolean;
+  bind_host: "127.0.0.1" | "loopback" | "non_loopback";
+  vault: {
+    configured: boolean;
+    managed_directory: string | null;
+    watcher_running: boolean;
+    sync_state: "watching" | "stopped" | "degraded" | "not_configured";
+  };
+  providers: {
+    chat: ProviderSettings;
+    embedding: ProviderSettings;
+    asr: ProviderSettings;
+    vision: ProviderSettings;
+    reranker: ProviderSettings;
+  };
+  retrieval: {
+    rag_query_max_chars: number;
+    rrf_k: number;
+    fts_limit: number;
+    vector_limit: number;
+    threshold: number;
+    confident_rank: number;
+    rerank_limit: number;
+  };
+  chunking: {
+    strategy: "paragraph_then_fixed_width";
+    max_chars: number;
+  };
+  video: {
+    retention_policy: "permanent" | "until_expiry" | "delete_after_processing";
+    retention_days: number;
+    max_bytes: number;
+    max_duration_seconds: number;
+    ffmpeg_state: SettingsHealthState;
+  };
+  maintenance: {
+    backup_available: boolean;
+    rescan_available: boolean;
+    rebuild_available: boolean;
+    configuration_hint: string;
+    restore_note: string;
+  };
+}
+
+export interface SettingsRescanResponse {
+  changed: number;
+  renamed: number;
+  missing: number;
+  conflicts: number;
+  invalid: number;
+  deferred: number;
+}
+
+export interface SettingsRebuildResponse {
+  published_items: number;
+  chunks: number;
+}
+
+export interface SettingsBackupResponse {
+  archive_id: string;
+  created_at: string;
+  sha256: string;
+  config_key: "BACKUP_ROOT";
+}
+
 export interface CitationLocator {
   kind:
     | "pdf"
@@ -649,6 +725,22 @@ export function getDashboard(signal?: AbortSignal): Promise<DashboardResponse> {
 
 export function getHealth(signal?: AbortSignal): Promise<HealthResponse> {
   return requestJson<HealthResponse>("/api/health", { signal });
+}
+
+export function getSettings(signal?: AbortSignal): Promise<SettingsResponse> {
+  return requestJson<SettingsResponse>("/api/settings", { signal });
+}
+
+export function rescanSettings(): Promise<SettingsRescanResponse> {
+  return requestJson<SettingsRescanResponse>("/api/settings/rescan", { method: "POST" }, 60_000);
+}
+
+export function rebuildDerivedState(): Promise<SettingsRebuildResponse> {
+  return requestJson<SettingsRebuildResponse>("/api/settings/rebuild", { method: "POST" }, 120_000);
+}
+
+export function createBackup(): Promise<SettingsBackupResponse> {
+  return requestJson<SettingsBackupResponse>("/api/settings/backup", { method: "POST" }, 120_000);
 }
 
 export function submitText(

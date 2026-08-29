@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 import app.core.errors as errors
 import app.services.health as health_service
+import app.services.settings as settings_service
 import app.main as main_module
 from app.core.config import PROJECT_ROOT, Settings, sqlite_url_for
 from app.main import create_app, normalize_request_id
@@ -82,6 +83,56 @@ def test_qdrant_and_artifact_health(settings: Settings) -> None:
         "artifact_storage", "Artifact Storage", settings.artifact_root, create=True
     )
     assert artifact.state == "healthy"
+
+
+def test_ffmpeg_probe_defaults_to_ffmpeg_and_hides_missing_configuration() -> None:
+    calls: list[str] = []
+
+    def missing(executable: str) -> None:
+        calls.append(executable)
+        return None
+
+    component = health_service.probe_ffmpeg(which=missing)
+
+    assert calls == ["ffmpeg"]
+    assert component.state == "not_configured"
+    assert "ffmpeg" not in component.detail
+
+
+@pytest.mark.asyncio
+async def test_ffmpeg_probe_and_settings_use_configured_executable_without_leaking_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+    configured_executable = "project-ffmpeg"
+    resolved_path = tmp_path / "private" / "ffmpeg"
+
+    def resolve(executable: str) -> str:
+        calls.append(executable)
+        return str(resolved_path)
+
+    monkeypatch.setattr(health_service.shutil, "which", resolve)
+    settings = Settings(
+        _env_file=None,
+        database_url=sqlite_url_for(tmp_path / "db.sqlite"),
+        qdrant_path=tmp_path / "qdrant",
+        artifact_root=tmp_path / "artifacts",
+        video_ffmpeg_executable=configured_executable,
+    )
+
+    health_report = await health_service.build_health_report(settings)
+    health_component = next(
+        component for component in health_report.components if component.key == "ffmpeg"
+    )
+    settings_response = settings_service.build_settings_response(settings)
+    serialized = repr(settings_response.model_dump(mode="json"))
+
+    assert calls == [configured_executable, configured_executable]
+    assert health_component.state == "healthy"
+    assert settings_response.video.ffmpeg_state == "healthy"
+    assert str(resolved_path) not in health_component.detail
+    assert str(resolved_path) not in serialized
+    assert configured_executable not in health_component.detail
 
 
 def test_artifact_probe_reports_unavailable_for_file(tmp_path: Path) -> None:

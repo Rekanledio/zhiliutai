@@ -343,9 +343,17 @@ async def probe_model_providers(settings: Settings) -> HealthComponent:
     )
 
 
-def probe_ffmpeg(which: Callable[[str], str | None] = shutil.which) -> HealthComponent:
-    executable = which("ffmpeg")
-    if executable is None:
+def probe_ffmpeg(
+    which: Callable[[str], str | None] | None = None,
+    *,
+    executable: str = "ffmpeg",
+) -> HealthComponent:
+    resolver = shutil.which if which is None else which
+    try:
+        resolved = resolver(executable)
+    except (OSError, TypeError, ValueError):
+        resolved = None
+    if resolved is None:
         return _component(
             "ffmpeg",
             "FFmpeg",
@@ -366,7 +374,7 @@ async def build_health_report(settings: Settings) -> HealthResponse:
         probe_obsidian(settings),
         probe_obsidian_watcher(settings),
         await probe_model_providers(settings),
-        probe_ffmpeg(),
+        probe_ffmpeg(executable=settings.video_ffmpeg_executable),
     ]
     required = {"api", "sqlite", "qdrant", "artifact_storage"}
     overall = "healthy"
