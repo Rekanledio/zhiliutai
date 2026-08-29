@@ -1,7 +1,8 @@
+import ipaddress
+import os
 import shutil
 import sqlite3
 import time
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -17,6 +18,7 @@ from app.obsidian.state import watcher_state
 from app.schemas.health import HealthComponent, HealthResponse
 
 logger = structlog.get_logger("health")
+_MAX_HEALTH_CHECK_TIMEOUT_SECONDS = 1.0
 
 
 def _component(
@@ -153,43 +155,116 @@ def probe_obsidian_watcher(settings: Settings) -> HealthComponent:
     )
 
 
+def _is_loopback_host(host: str | None) -> bool:
+    if not host:
+        return False
+    if host.casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _health_check_timeout(settings: Settings) -> float:
+    return min(
+        max(float(settings.health_check_timeout), 0.01),
+        _MAX_HEALTH_CHECK_TIMEOUT_SECONDS,
+    )
+
+
 async def _probe_http_model(
     settings: Settings,
     base_url: str,
-    model: str,
+    capability: str,
     api_key: str | None,
 ) -> tuple[str, str, float | None]:
-    parsed = urlsplit(base_url)
+    try:
+        parsed = urlsplit(base_url)
+        # Accessing port validates malformed bracketed/port authority values.
+        _ = parsed.port
+    except ValueError:
+        return "degraded", f"{capability} 地址格式无效", None
     if (
         parsed.scheme not in {"http", "https"}
         or not parsed.netloc
+        or parsed.hostname is None
         or parsed.username is not None
         or parsed.password is not None
         or parsed.query
         or parsed.fragment
+        or any(character.isspace() for character in base_url)
     ):
-        return "degraded", f"{model} 地址格式无效", None
+        return "degraded", f"{capability} 地址格式无效", None
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    local_without_key = not api_key and _is_loopback_host(parsed.hostname)
     started = time.perf_counter()
     try:
         async with httpx.AsyncClient(
-            timeout=settings.health_check_timeout,
+            timeout=_health_check_timeout(settings),
             follow_redirects=False,
             trust_env=False,
         ) as client:
             response = await client.get(f"{base_url.rstrip('/')}/models", headers=headers)
+    except httpx.TimeoutException:
+        logger.info("model_probe_timeout", capability=capability)
+        return "degraded", f"{capability} 探针超时", None
+    except httpx.ConnectError:
+        logger.info("model_probe_connection_failed", capability=capability)
+        return "degraded", f"{capability} 服务不可达", None
+    except httpx.HTTPError as error:
+        logger.info(
+            "model_probe_http_failed",
+            capability=capability,
+            error_type=_safe_error_type(error),
+        )
+        return "degraded", f"{capability} 探针请求失败", None
     except Exception as error:
         logger.info("model_probe_failed", error_type=_safe_error_type(error))
-        return "degraded", f"{model} 服务不可达", None
+        return "degraded", f"{capability} 探针失败", None
     latency = round((time.perf_counter() - started) * 1000, 1)
+    if 200 <= response.status_code < 300:
+        endpoint_kind = "本地端点" if local_without_key else "端点"
+        return (
+            "healthy",
+            f"{capability} {endpoint_kind}已验证（HTTP {response.status_code}）",
+            latency,
+        )
+    if response.status_code in {401, 403}:
+        return (
+            "degraded",
+            f"{capability} 端点认证未通过（HTTP {response.status_code}）",
+            latency,
+        )
+    if 300 <= response.status_code < 400:
+        return (
+            "degraded",
+            f"{capability} 重定向被拒绝（HTTP {response.status_code}）",
+            latency,
+        )
+    if 400 <= response.status_code < 500:
+        return (
+            "degraded",
+            f"{capability} 端点返回客户端错误（HTTP {response.status_code}）",
+            latency,
+        )
     if response.status_code >= 500:
-        return "degraded", f"{model} 服务返回错误", latency
-    return "configured", f"{model} 服务可达，能力将在调用时验证", latency
+        return (
+            "degraded",
+            f"{capability} 端点返回服务端错误（HTTP {response.status_code}）",
+            latency,
+        )
+    return (
+        "degraded",
+        f"{capability} 端点返回异常状态（HTTP {response.status_code}）",
+        latency,
+    )
 
 
 async def probe_model_providers(settings: Settings) -> HealthComponent:
-    local_capabilities: list[str] = []
+    local_configured = False
     local_failures: list[str] = []
+    local_detail = "本地能力：未使用 FastEmbed"
     if settings.embedding_provider == "fastembed" and settings.embedding_model:
         cache = probe_writable_directory(
             "embedding_cache",
@@ -197,9 +272,14 @@ async def probe_model_providers(settings: Settings) -> HealthComponent:
             settings.embedding_cache_path,
             create=True,
         )
-        local_capabilities.append(f"Embedding(FastEmbed:{settings.embedding_model})")
+        local_configured = True
         if cache.state != "healthy":
             local_failures.append("Embedding")
+            local_detail = "本地能力：Embedding=FastEmbed 缓存不可用"
+        else:
+            local_detail = "本地能力：Embedding=FastEmbed（首次调用时加载）"
+    elif settings.embedding_provider == "fastembed":
+        local_detail = "本地能力：Embedding=未配置"
 
     capabilities = [
         ("Chat", settings.chat_base_url, settings.chat_model, settings.chat_api_key),
@@ -217,39 +297,48 @@ async def probe_model_providers(settings: Settings) -> HealthComponent:
                 settings.embedding_api_key,
             ),
         )
-    configured = [
-        (name, url, model, key) for name, url, model, key in capabilities if url and model
-    ]
-    if not configured and not local_capabilities:
+    remote_summaries: list[str] = []
+    remote_failures: list[str] = []
+    remote_configured = False
+    latencies: list[float] = []
+    for name, url, model, key in capabilities:
+        if url and model:
+            remote_configured = True
+            state, detail, latency = await _probe_http_model(settings, url, name, key)
+            remote_summaries.append(detail)
+            if state != "healthy":
+                remote_failures.append(name)
+            if latency is not None:
+                latencies.append(latency)
+        elif url or model:
+            remote_failures.append(name)
+            remote_summaries.append(f"{name}=配置不完整")
+        else:
+            remote_summaries.append(f"{name}=未配置")
+
+    if not remote_configured and not local_configured and not remote_failures:
         return _component(
             "model_providers",
             "Model Providers",
             "not_configured",
-            "Chat、Embedding、ASR、Vision、Reranker 均未配置",
+            f"{local_detail}；远程能力：{'、'.join(remote_summaries)}",
         )
-    failures: list[str] = list(local_failures)
-    latencies: list[float] = []
-    for name, url, model, key in configured:
-        assert url is not None and model is not None
-        state, detail, latency = await _probe_http_model(settings, url, model, key)
-        if state == "degraded":
-            failures.append(name)
-        if latency is not None:
-            latencies.append(latency)
-    names = "、".join([*(name for name, *_ in configured), *local_capabilities])
+    failures = [*local_failures, *remote_failures]
+    detail = f"{local_detail}；远程能力：{'、'.join(remote_summaries)}"
     if failures:
         return _component(
             "model_providers",
             "Model Providers",
             "degraded",
-            f"不可达能力：{'、'.join(failures)}；已配置：{names}",
+            detail,
             max(latencies, default=None),
         )
+    aggregate_state = "configured" if local_configured else "healthy"
     return _component(
         "model_providers",
         "Model Providers",
-        "configured",
-        f"已配置：{names}；远程端点已探测，本地模型在首次调用时加载",
+        aggregate_state,
+        detail,
         max(latencies, default=None),
     )
 

@@ -126,6 +126,49 @@ async def test_model_not_configured(tmp_path: Path) -> None:
     assert component.state == "not_configured"
 
 
+def _model_settings(tmp_path: Path, **overrides: object) -> Settings:
+    values: dict[str, object] = {
+        "database_url": sqlite_url_for(tmp_path / "db.sqlite"),
+        "qdrant_path": tmp_path / "qdrant",
+        "artifact_root": tmp_path / "artifacts",
+        "chat_base_url": "http://127.0.0.1:9001/v1",
+        "chat_model": "synthetic-chat",
+    }
+    values.update(overrides)
+    return Settings(_env_file=None, **values)
+
+
+def _install_model_mock(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    status_code: int = 200,
+    error: Exception | None = None,
+) -> tuple[list[httpx.Request], list[dict[str, object]]]:
+    requests: list[httpx.Request] = []
+    client_options: list[dict[str, object]] = []
+    real_client = health_service.httpx.AsyncClient
+    response_secret = "SYNTHETIC_HEALTH_RESPONSE_SECRET"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if error is not None:
+            raise error
+        return httpx.Response(
+            status_code,
+            text=f"Authorization: Bearer {response_secret}; Cookie: {response_secret}",
+            headers={"Set-Cookie": response_secret},
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    def client_factory(**kwargs: object) -> httpx.AsyncClient:
+        client_options.append(kwargs)
+        return real_client(transport=transport, **kwargs)
+
+    monkeypatch.setattr(health_service.httpx, "AsyncClient", client_factory)
+    return requests, client_options
+
+
 @pytest.mark.asyncio
 async def test_fastembed_model_reports_configured_without_loading_model(
     tmp_path: Path,
@@ -143,7 +186,122 @@ async def test_fastembed_model_reports_configured_without_loading_model(
     component = await health_service.probe_model_providers(settings)
     assert component.state == "configured"
     assert "FastEmbed" in component.detail
+    assert "远程能力" in component.detail
+    assert "Chat=未配置" in component.detail
     assert settings.embedding_cache_path.is_dir()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "expected_state", "expected_detail"),
+    [
+        (200, "healthy", "已验证"),
+        (401, "degraded", "认证未通过"),
+        (403, "degraded", "认证未通过"),
+        (404, "degraded", "客户端错误"),
+        (500, "degraded", "服务端错误"),
+    ],
+)
+async def test_model_probe_only_treats_successful_2xx_as_healthy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    status_code: int,
+    expected_state: str,
+    expected_detail: str,
+) -> None:
+    requests, client_options = _install_model_mock(
+        monkeypatch,
+        status_code=status_code,
+    )
+    component = await health_service.probe_model_providers(
+        _model_settings(tmp_path, chat_api_key="SYNTHETIC_API_KEY")
+    )
+
+    assert component.state == expected_state
+    assert expected_detail in component.detail
+    assert f"HTTP {status_code}" in component.detail
+    assert "SYNTHETIC_API_KEY" not in component.detail
+    assert "SYNTHETIC_HEALTH_RESPONSE_SECRET" not in component.detail
+    assert requests[0].url == "http://127.0.0.1:9001/v1/models"
+    assert client_options[0]["follow_redirects"] is False
+    assert client_options[0]["trust_env"] is False
+
+
+@pytest.mark.asyncio
+async def test_model_probe_rejects_redirect_without_following_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    requests, _ = _install_model_mock(monkeypatch, status_code=302)
+
+    component = await health_service.probe_model_providers(_model_settings(tmp_path))
+
+    assert component.state == "degraded"
+    assert "重定向被拒绝" in component.detail
+    assert "HTTP 302" in component.detail
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected_detail"),
+    [
+        (httpx.ReadTimeout("timeout sentinel"), "探针超时"),
+        (httpx.ConnectError("connection sentinel"), "服务不可达"),
+    ],
+)
+async def test_model_probe_reports_stable_network_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    error: Exception,
+    expected_detail: str,
+) -> None:
+    _install_model_mock(monkeypatch, error=error)
+
+    component = await health_service.probe_model_providers(_model_settings(tmp_path))
+
+    assert component.state == "degraded"
+    assert expected_detail in component.detail
+    assert "sentinel" not in component.detail
+
+
+@pytest.mark.asyncio
+async def test_loopback_provider_without_api_key_can_be_verified(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    requests, _ = _install_model_mock(monkeypatch)
+
+    component = await health_service.probe_model_providers(
+        _model_settings(tmp_path, chat_api_key=None)
+    )
+
+    assert component.state == "healthy"
+    assert "本地端点已验证" in component.detail
+    assert "authorization" not in requests[0].headers
+
+
+@pytest.mark.asyncio
+async def test_fastembed_and_remote_capabilities_are_explicitly_aggregated(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    requests, _ = _install_model_mock(monkeypatch)
+    settings = _model_settings(
+        tmp_path,
+        embedding_provider="fastembed",
+        embedding_model="synthetic-fastembed",
+        embedding_cache_path=tmp_path / "models",
+        vision_base_url="http://127.0.0.1:9002/v1",
+        vision_model="synthetic-vision",
+    )
+
+    component = await health_service.probe_model_providers(settings)
+
+    assert component.state == "configured"
+    assert len(requests) == 2
+    assert "本地能力：Embedding=FastEmbed" in component.detail
+    assert "Chat 本地端点已验证" in component.detail
+    assert "Vision 本地端点已验证" in component.detail
+    assert "ASR=未配置" in component.detail
+    assert "Reranker=未配置" in component.detail
 
 
 @pytest.mark.asyncio
@@ -213,7 +371,7 @@ async def test_asr_and_vision_health_probe_uses_keys_without_exposing_them(
 
     component = await health_service.probe_model_providers(settings)
 
-    assert component.state == "configured"
+    assert component.state == "healthy"
     assert calls == [
         (
             "http://127.0.0.1:9001/v1/models",

@@ -262,17 +262,42 @@ button:focus-visible {
   flex: 0 0 auto;
   align-items: center;
   padding: 4px 7px;
+  border: 1px solid transparent;
   border-radius: 7px;
-  background: currentColor;
-  color: #fff;
+  white-space: nowrap;
   font-size: 10px;
   font-weight: 700;
   line-height: 1;
 }
 
+.status-badge.is-healthy {
+  color: #245c4a;
+  background: #dcefe5;
+  border-color: #b7d8c7;
+}
+
+.status-badge.is-configured {
+  color: #5d4a68;
+  background: #ece4f1;
+  border-color: #d5c5dd;
+}
+
+.status-badge.is-degraded {
+  color: #884b30;
+  background: #f6e0d4;
+  border-color: #e9c4b3;
+}
+
 .status-badge.is-muted {
-  color: #8d9691;
-  background: #e7e8e2;
+  color: #5d6a64;
+  background: #e6ebe7;
+  border-color: #ccd7d0;
+}
+
+.status-badge.is-unavailable {
+  color: #7e2d2d;
+  background: #f3dddd;
+  border-color: #e4baba;
 }
 
 .sidebar-footer .status-badge {

@@ -42,7 +42,7 @@ const stateLabel: Record<HealthState, string> = {
   healthy: "正常",
   degraded: "降级",
   not_configured: "未配置",
-  configured: "已配置（未验证）",
+  configured: "已配置",
   unavailable: "不可用",
 };
 
@@ -87,8 +87,17 @@ function StatusDot({ state }: { state: HealthState }) {
   return <span className={"status-dot " + stateTone[state]} aria-hidden="true" />;
 }
 
-function StatusBadge({ state }: { state: HealthState }) {
-  return <span className={"status-badge " + stateTone[state]}>{stateLabel[state]}</span>;
+function StatusBadge({ state, detail }: { state: HealthState; detail?: string }) {
+  const accessibleLabel = detail ? stateLabel[state] + "：" + detail : stateLabel[state];
+  return (
+    <span
+      className={"status-badge " + stateTone[state]}
+      aria-label={accessibleLabel}
+      title={detail}
+    >
+      {stateLabel[state]}
+    </span>
+  );
 }
 
 function ServiceStatus({ components }: { components: HealthComponent[] }) {
@@ -105,7 +114,7 @@ function ServiceStatus({ components }: { components: HealthComponent[] }) {
               <StatusDot state={component.state} />
               <span>{component.label}</span>
             </div>
-            <StatusBadge state={component.state} />
+            <StatusBadge state={component.state} detail={component.detail} />
           </div>
         ))}
       </div>
@@ -291,10 +300,10 @@ function PlaceholderPage({ item }: { item: NavItem }) {
       <span className="placeholder-icon">{item.icon}</span>
       <span className="eyebrow">{item.section}</span>
       <h1>{item.label}</h1>
-      <p>导航和页面边界已经就绪。这个模块会在后续阶段按 PROJECT.md 的范围逐步接入。</p>
+      <p>页面入口已经保留，相关功能正在本轮补齐。</p>
       <div className="placeholder-boundary">
-        <span>当前阶段</span>
-        <strong>阶段 4 · Hybrid Retrieval + RAG</strong>
+        <span>当前状态</span>
+        <strong>功能正在补齐</strong>
       </div>
     </section>
   );

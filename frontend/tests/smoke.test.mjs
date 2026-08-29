@@ -30,7 +30,12 @@ const dashboardResponse = {
       { key: "artifact_storage", label: "Artifact Storage", state: "healthy", detail: "目录可读写" },
       { key: "obsidian", label: "Obsidian Vault", state: "healthy", detail: "目录可读写" },
       { key: "obsidian_watcher", label: "Obsidian Watcher", state: "healthy", detail: "监听中" },
-      { key: "model_providers", label: "Model Providers", state: "not_configured", detail: "尚未配置" },
+      {
+        key: "model_providers",
+        label: "Model Providers",
+        state: "configured",
+        detail: "本地能力：Embedding=FastEmbed；远程能力：Chat=未配置",
+      },
       { key: "ffmpeg", label: "FFmpeg", state: "not_configured", detail: "仅影响视频" },
     ],
   },
@@ -144,6 +149,17 @@ describe("阶段 1/2 React 工作台", () => {
     expect(screen.getAllByText("SQLite").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Qdrant Local").length).toBeGreaterThan(0);
     expect(screen.getAllByText("未配置").length).toBeGreaterThan(0);
+    expect(screen.queryByText("已配置（未验证）")).toBeNull();
+    const modelStatusBadges = screen.getAllByLabelText(
+      "已配置：本地能力：Embedding=FastEmbed；远程能力：Chat=未配置",
+    );
+    expect(modelStatusBadges).toHaveLength(2);
+    for (const badge of modelStatusBadges) {
+      expect(badge.getAttribute("title")).toBe(
+        "本地能力：Embedding=FastEmbed；远程能力：Chat=未配置",
+      );
+      expect(badge.className).toContain("is-configured");
+    }
   });
 
   test("展示七项导航并切换阶段 2 与占位页面", async () => {
@@ -159,6 +175,9 @@ describe("阶段 1/2 React 工作台", () => {
       fireEvent.click(within(navigation).getByRole("button", { name: new RegExp("^" + label) }));
       expect(await screen.findByRole("heading", { level: 1, name: label })).toBeTruthy();
     }
+    expect(screen.getByText("页面入口已经保留，相关功能正在本轮补齐。")).toBeTruthy();
+    expect(screen.getByText("功能正在补齐")).toBeTruthy();
+    expect(screen.queryByText(/阶段 4/)).toBeNull();
   });
 
   test("首页粘贴文本入口进入真实收件箱", async () => {
