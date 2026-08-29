@@ -1,7 +1,8 @@
 # 测试与验证策略
 
-阶段 6 最终结论为 **PASS WITH NON-BLOCKING RISKS**（Sol 已完成最终复验）。Playwright Chromium
-合成闭环已在 GitHub Actions run 33246710524 通过；本机缺少匹配版本浏览器，只登记为本机环境限制。
+阶段 6 最终结论为 **PASS WITH NON-BLOCKING RISKS**（Sol 已完成最终复验）。提交
+`ba7e247aac0213c85e223bff3238143af16a99f8` 的四个 H3 基线 CI jobs 均通过；H4 新增的 Playwright
+合成用例尚未在 CI 执行。本机缺少匹配版本浏览器，只登记为本机环境限制，不把本地真实浏览器执行写成通过。
 
 ## 本地门禁
 
@@ -156,10 +157,12 @@ MCP Provider 的实际入口为 `uv run --directory backend python -m app.mcp.se
 transport，覆盖采集 → JobRunner/Graph 处理 → 人工审核 → 发布到 Obsidian → SQLite/Qdrant
 检索 → 带 Citation 的 SSE 回答 → MCP `search_knowledge`/`get_item` 查询闭环。前端 Playwright
 使用固定 `@playwright/test==1.53.0`、`workers=1`、127.0.0.1 Vite webServer 和浏览器内合成
-API fixture，覆盖收件箱审核、发布、搜索、证据回答和 Citation UI；失败时保留 trace、screenshot
-和 video。CI 还执行独立 E2E typecheck、Chromium 安装和 Playwright，并上传 `playwright-report`
-与 `test-results`。GitHub Actions run 33246710524 的 Playwright Chromium job 已通过；本机未安装
-Playwright 1.53 对应 Chromium，因此本机真实 E2E 仍作为环境限制。阶段 6 结论仍为 **PASS WITH NON-BLOCKING RISKS**。
+API fixture，覆盖收件箱审核、发布、合集列表/详情/移除成员、设置页五类 Provider、FFmpeg
+未配置说明、一次合成备份、搜索、证据回答和 Citation UI；所有未处理的 `/api/**` 请求都会使
+测试失败。失败时保留 trace、screenshot 和 video。CI 还执行独立 E2E typecheck、Chromium 安装
+和 Playwright，并上传 `playwright-report` 与 `test-results`。提交 `ba7e247aac0213c85e223bff3238143af16a99f8`
+的四个 H3 基线 jobs 均通过；H4 新增合集/设置用例尚未在 CI 执行。本机未安装 Playwright 1.53
+对应 Chromium，因此本机真实 E2E 仍作为环境限制。阶段 6 结论仍为 **PASS WITH NON-BLOCKING RISKS**。
 测试不访问真实 Vault、网页、视频、模型、密钥或外部 MCP。
 
 阶段 6 批次 G 定向命令：
@@ -168,8 +171,27 @@ Playwright 1.53 对应 Chromium，因此本机真实 E2E 仍作为环境限制�
 uv run --directory backend ruff check tests/test_stage6_end_to_end.py
 uv run --directory backend pytest -q tests/test_stage6_end_to_end.py
 npm --prefix frontend run e2e:typecheck
-npm --prefix frontend run e2e
+npm --prefix frontend run e2e -- --list
 ~~~
+
+H4 本轮合成浏览器收口的本机结果：`e2e:typecheck` 和 `e2e -- --list` 只验证测试加载，真实
+Chromium 执行仍受本机浏览器环境限制；不下载或安装浏览器。Sol 已记录的全量结果为后端 209
+passed、前端 5 files / 27 tests；提交 `ba7e247aac0213c85e223bff3238143af16a99f8` 的四个
+H3 基线 jobs 全通过，H4 新增 Playwright 用例尚未在 CI 执行。
+
+## 阶段 6 H1–H3 维护功能
+
+- H1 定向测试使用 MockTransport 和合成配置，覆盖远程 Provider 的 2xx、认证失败、其他
+  4xx/5xx、超时、连接失败、loopback 无 key、FastEmbed 与远程能力聚合，以及首页/设置页共用
+  `VIDEO_FFMPEG_EXECUTABLE` 的 FFmpeg 探针；响应不包含 key、Authorization/Cookie、查询串、
+  绝对路径或 traceback。
+- H2 定向测试使用临时 SQLite/Vault，覆盖合集 CRUD、已发布 current 成员过滤、关系幂等、
+  `collections` Frontmatter 写入与 rescan 收敛；用户修改的 tags 和正文哈希保持不变，删除合集
+  不删除知识正文、Artifact 或向量。前端测试覆盖合集列表/详情/成员移除和空态。
+- H3 定向测试使用临时运行根，覆盖严格设置响应、五类 Provider、维护操作的确认/锁/错误边界、
+  服务端生成备份归档，以及 rescan/rebuild 复用普通 application service。客户端不提交路径、
+  文件名、overwrite 或密钥；restore 只由离线 CLI 执行，`BACKUP_ROOT=data/backups/` 已被 Git
+  忽略。
 
 阶段 5 批次 B 使用 `httpx.MockTransport`、确定性 DNS 和临时 Artifact/SQLite，覆盖视频
 入口字段白名单、幂等重复提交、IPv4/IPv6/链路本地/私网/元数据/文档地址、每个显式重定向、
@@ -215,7 +237,7 @@ npm --prefix frontend run test
 ## 环境能力门禁
 
 - Docker build：GitHub Actions 或具备 Docker 的环境；不要求本机安装 Docker。
-- 真实浏览器自动化：Playwright Chromium 合成闭环已在 GitHub Actions 通过；人工浏览器闭环 passed。本机缺少 Playwright 1.53 对应 Chromium，不把本机运行写成通过。
+- 真实浏览器自动化：H3 基线的 Playwright Chromium 合成闭环已在 GitHub Actions 通过；H4 新增 Playwright 用例尚未在 CI 执行。人工浏览器闭环 passed；本机缺少 Playwright 1.53 对应 Chromium，不把本机运行写成通过。
 - FFmpeg/yt-dlp：本机未调用真实二进制且不自行安装；阶段 5 使用注入 runner、默认本机
   loopback 安全代理和离线 connector 验证固定 adapter/网络边界，缺失二进制必须返回
   capability/degraded，不得伪装真实工具互操作已经通过。

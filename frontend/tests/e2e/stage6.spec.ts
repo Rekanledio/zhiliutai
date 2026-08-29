@@ -4,6 +4,7 @@ const now = "2026-08-28T00:00:00+08:00";
 const itemId = "11111111-1111-4111-8111-111111111111";
 const versionId = "22222222-2222-4222-8222-222222222222";
 const jobId = "33333333-3333-4333-8333-333333333333";
+const collectionId = "66666666-6666-4666-8666-666666666666";
 
 const itemBody = "SQLite 是合成浏览器闭环的版本权威。";
 
@@ -63,6 +64,113 @@ function dashboard(status: "pending_review" | "reviewed" | "published") {
       : [],
     recent_items: status === "published" ? [{ id: itemId, title: "合成 E2E 知识", status }] : [],
     processing_jobs: [],
+  };
+}
+
+function collectionSummary() {
+  return {
+    id: collectionId,
+    name: "合成阅读合集",
+    description: "只读合成说明",
+    item_count: 1,
+    moc_enabled: false,
+  };
+}
+
+function collectionDetail(hasMember: boolean) {
+  return {
+    ...collectionSummary(),
+    item_count: hasMember ? 1 : 0,
+    items: hasMember
+      ? [
+          {
+            id: itemId,
+            title: "合成 E2E 知识",
+            source_type: "markdown",
+            version_no: 1,
+            suggested_tags: ["测试"],
+          },
+        ]
+      : [],
+    related_tags: hasMember ? ["测试"] : [],
+    moc_status: "not_enabled" as const,
+  };
+}
+
+function settingsResponse() {
+  return {
+    local_only: true,
+    bind_host: "127.0.0.1",
+    vault: {
+      configured: true,
+      managed_directory: "知流台",
+      watcher_running: true,
+      sync_state: "watching",
+    },
+    providers: {
+      chat: {
+        capability: "chat",
+        provider_kind: "openai-compatible",
+        configured: true,
+        credential_configured: true,
+        model: "synthetic-chat",
+      },
+      embedding: {
+        capability: "embedding",
+        provider_kind: "fastembed",
+        configured: true,
+        credential_configured: false,
+        model: "synthetic-embedding",
+      },
+      asr: {
+        capability: "asr",
+        provider_kind: "openai-compatible",
+        configured: false,
+        credential_configured: false,
+        model: null,
+      },
+      vision: {
+        capability: "vision",
+        provider_kind: "openai-compatible",
+        configured: false,
+        credential_configured: false,
+        model: null,
+      },
+      reranker: {
+        capability: "reranker",
+        provider_kind: "openai-compatible",
+        configured: false,
+        credential_configured: false,
+        model: null,
+      },
+    },
+    retrieval: {
+      rag_query_max_chars: 2000,
+      rrf_k: 60,
+      fts_limit: 30,
+      vector_limit: 30,
+      threshold: 0.35,
+      confident_rank: 3,
+      rerank_limit: 20,
+    },
+    chunking: {
+      strategy: "paragraph_then_fixed_width",
+      max_chars: 800,
+    },
+    video: {
+      retention_policy: "delete_after_processing",
+      retention_days: 7,
+      max_bytes: 500000000,
+      max_duration_seconds: 14400,
+      ffmpeg_state: "not_configured",
+    },
+    maintenance: {
+      backup_available: true,
+      rescan_available: true,
+      rebuild_available: true,
+      configuration_hint: "配置通过项目根目录 .env，重启后生效；API Key 仅在后端秘密配置中使用。",
+      restore_note: "恢复必须先停止服务，再按文档化离线 CLI 执行；设置页不提供在线恢复。",
+    },
   };
 }
 
@@ -267,5 +375,119 @@ test("synthetic review publish search answer and citation flow", async ({ page }
       "POST /api/search",
       "POST /api/chat/stream",
     ]),
+  );
+});
+
+test("synthetic collections page lists a collection and removes a member", async ({ page }) => {
+  let hasMember = true;
+  const observed: string[] = [];
+
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname;
+    observed.push(`${request.method()} ${path}`);
+
+    if (request.method() === "GET" && path === "/api/dashboard") {
+      await route.fulfill({ json: dashboard("published") });
+      return;
+    }
+    if (request.method() === "GET" && path === "/api/collections") {
+      await route.fulfill({ json: [collectionSummary()] });
+      return;
+    }
+    if (request.method() === "GET" && path === "/api/items") {
+      expect(url.searchParams.get("status")).toBe("published");
+      await route.fulfill({ json: [item("published")] });
+      return;
+    }
+    if (request.method() === "GET" && path === `/api/collections/${collectionId}`) {
+      await route.fulfill({ json: collectionDetail(hasMember) });
+      return;
+    }
+    if (
+      request.method() === "DELETE" &&
+      path === `/api/collections/${collectionId}/items/${itemId}`
+    ) {
+      hasMember = false;
+      await route.fulfill({ json: collectionDetail(false) });
+      return;
+    }
+    throw new Error(`Unhandled synthetic API request: ${request.method()} ${path}`);
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "合集" }).click();
+  await expect(page.getByRole("heading", { name: "合集", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "合成阅读合集", exact: true })).toBeVisible();
+  await expect(page.getByText("合成 E2E 知识", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "移除", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("知识条目已移出合集");
+  await expect(
+    page.getByText("还没有成员；只能加入已发布的知识条目。", { exact: true }),
+  ).toBeVisible();
+  expect(observed).toEqual(
+    expect.arrayContaining([
+      "GET /api/collections",
+      "GET /api/items",
+      `GET /api/collections/${collectionId}`,
+      `DELETE /api/collections/${collectionId}/items/${itemId}`,
+    ]),
+  );
+});
+
+test("synthetic settings page shows capabilities and completes a backup", async ({ page }) => {
+  const observed: string[] = [];
+
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname;
+    observed.push(`${request.method()} ${path}`);
+
+    if (request.method() === "GET" && path === "/api/dashboard") {
+      await route.fulfill({ json: dashboard("published") });
+      return;
+    }
+    if (request.method() === "GET" && path === "/api/settings") {
+      await route.fulfill({ json: settingsResponse() });
+      return;
+    }
+    if (request.method() === "POST" && path === "/api/settings/backup") {
+      await route.fulfill({
+        status: 201,
+        json: {
+          archive_id: "backup-" + "a".repeat(32),
+          created_at: "2026-08-29T00:00:00Z",
+          sha256: "b".repeat(64),
+          config_key: "BACKUP_ROOT",
+        },
+      });
+      return;
+    }
+    throw new Error(`Unhandled synthetic API request: ${request.method()} ${path}`);
+  });
+
+  page.on("dialog", async (dialog) => {
+    await dialog.accept();
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "设置" }).click();
+  await expect(page.getByRole("heading", { name: "设置", exact: true })).toBeVisible();
+  for (const provider of ["Chat", "Embedding", "ASR", "Vision", "Reranker"]) {
+    await expect(page.getByRole("heading", { name: provider, exact: true })).toBeVisible();
+  }
+  await expect(
+    page.getByText("FFmpeg 未配置只影响视频能力；请稍后按人工步骤安装。", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "重新扫描", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "创建备份", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "重建派生索引", exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "创建备份", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("备份已创建");
+  expect(observed).toEqual(
+    expect.arrayContaining(["GET /api/settings", "POST /api/settings/backup"]),
   );
 });

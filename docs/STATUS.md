@@ -1,6 +1,6 @@
 # 项目状态
 
-更新时间：2026-08-29
+更新时间：2026-08-30
 
 ## 最终结论
 
@@ -39,12 +39,14 @@
 - 批次 D/E 仅提供五个 MCP 工具和显式 profile 的受控 Client；输入 strict/`extra=forbid`，能力取交集，错误和结果递归脱敏，不启用 Agent 自动工具循环。Collection 关系使用最小 0006 migration。
 - 批次 F 使用固定归档、manifest/hash、离线 restore 和显式 CLI。restore 默认不覆盖，业务/独立 checkpoint 主文件及 `-wal/-shm` sidecar 一并安装、清理、回滚；Qdrant 由已验证 Markdown/Artifact/SQLite 关系重建。
 - 批次 G 已有合成端到端闭环、前端 Playwright 代码、E2E typecheck、CI 门禁和失败产物配置；本机浏览器 runner 的真实执行仍按风险登记。
+- H1–H3 已落地实时健康探针与安全设置投影、人工合集/Markdown Frontmatter 收敛，以及受控 rescan/backup/rebuild；均未新增阶段外 Graph 或正文主来源。
 
-## 本轮极小收口
+## H4 最终极小收口
 
 - `BackupRestoreService.restore_backup` 现在拒绝归档与业务/ checkpoint 主文件或任一 sidecar 重叠，拒绝归档位于 Artifact/Vault 目标内，并在创建实际 staging 后拒绝任何目标与 staging 的父子碰撞。
 - 新增定向测试覆盖 archive==database、archive==checkpoint `-wal`、归档位于 Artifact/Vault、强制 staging 碰撞以及独立目标正常恢复。
-- `AGENTS.md`、`README.md`、本文件、`docs/ARCHITECTURE.md`、`docs/TESTING.md` 和 `docs/DECISIONS.md` 均统一记录最终结论为 **PASS WITH NON-BLOCKING RISKS**；未修改 `docs/PROJECT.md`。
+- `frontend/tests/e2e/stage6.spec.ts` 使用合成 API route fixture 增加合集列表/详情/移除成员和设置页五类 Provider/FFmpeg/备份成功覆盖；未处理的 `/api/**` 请求直接失败，fixture 不含真实路径或 secret。
+- `README.md`、本文件、`docs/ARCHITECTURE.md` 和 `docs/TESTING.md` 已同步本轮事实并保留 **PASS WITH NON-BLOCKING RISKS** 结论；本轮未修改 `AGENTS.md`、`docs/DECISIONS.md` 或 `docs/PROJECT.md`。
 
 ## 验证证据
 
@@ -54,18 +56,18 @@ uv lock --project backend --check                     passed
 uv run --directory backend ruff check app tests       passed
 uv run --directory backend pytest -q tests/test_stage6_backup_restore.py tests/test_stage6_backup_cli.py
                                                         10 passed in 2.41s
-uv run --directory backend pytest -q                  181 passed in 45.40s，无 warning
+Sol 全量 backend                                        209 passed
 temporary SQLite alembic upgrade -> downgrade -> upgrade
                                                         passed（0001–0006）
 npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
                                                         passed；whatwg-encoding 弃用警告
 npm --prefix frontend run typecheck                   passed
-npm --prefix frontend run test                        20 passed
+npm --prefix frontend run test                        5 files / 27 tests
 npm --prefix frontend run build                       passed
 npm --prefix frontend run e2e:typecheck               passed
-npm --prefix frontend run e2e -- --list               passed：发现 1 个测试
-npm --prefix frontend run e2e                         本机环境限制：缺少 Playwright 1.53 Chromium
-GitHub Actions run 33246710524 / playwright            passed：1 个 Chromium 合成闭环测试
+npm --prefix frontend run e2e -- --list               passed：发现 3 个测试
+npm --prefix frontend run e2e                         本批未运行：本机缺少 Playwright 1.53 Chromium
+GitHub Actions commit ba7e247 / 4 H3 baseline jobs     passed；H4 新增 Playwright 用例尚未在 CI 执行
 git -c safe.directory=D:/Work/zhiliutai -C D:/Work/zhiliutai diff --check
                                                         passed
 ~~~
@@ -74,7 +76,8 @@ git -c safe.directory=D:/Work/zhiliutai -C D:/Work/zhiliutai diff --check
 
 ## 非阻塞风险与下一步
 
-- GitHub Actions 的 Playwright Chromium 闭环已通过；本机仍未安装匹配版本的 Chromium，只登记为本机环境限制。
+- 合集 rename 在 Vault 写入成功但 SQLite 提交前发生不可捕获进程崩溃时，watcher 可能收敛出新合集并留下旧空合集；不会丢失知识正文或成员关系。
+- 提交 `ba7e247aac0213c85e223bff3238143af16a99f8` 的四个 H3 基线 CI jobs 均通过；H4 新增 Playwright 用例尚未在 CI 执行，本机仍未安装匹配版本的 Chromium，只登记为本机环境限制。
 - 真实 extractor、yt-dlp、FFmpeg、ASR/Vision/OCR、模型、网页和外部 MCP 互操作未验证；Docker build 也只由 CI/具备 Docker 的环境承担。
 - SQLite、Artifact、Vault、Qdrant 之间不具备跨存储物理事务；恢复后必须显式 rebuild，运行期依赖补偿和权威关系复核。
 - 阶段 4 的 reranker 协议风险和阶段 5 的 HTTPS/真实视频互操作风险继续有效。
@@ -82,6 +85,6 @@ git -c safe.directory=D:/Work/zhiliutai -C D:/Work/zhiliutai diff --check
 
 ## Git 与数据边界
 
-- 当前分支为 `main`；HEAD 与 `origin/main` 均为 `0804e2b3322e2f22ce09fad817984fbb65693271`。
-- 当前阶段 4/5/6 累计改动保持未提交；未 commit、未 push、未 reset、未 restore、未修改全局 Git 配置。
+- H4 开始核对时分支为 `main`；HEAD 与 `origin/main` 均为 `ba7e247aac0213c85e223bff3238143af16a99f8`。
+- 本批提交/推送由 Sol 验收后执行；本批未读取、未修改或纳入提交受保护的 `data/manual/`。
 - `.env`、SQLite、Qdrant、Artifact、Vault、node_modules、虚拟环境和构建缓存均不纳入 Git。

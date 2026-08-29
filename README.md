@@ -2,7 +2,7 @@
 
 知流台是单用户、本机优先的个人知识采集、整理、检索和问答工作台。用户确认后的正文唯一写入 Obsidian Markdown；SQLite 保存业务元数据、任务状态与 FTS5 索引；Qdrant Local 保存向量索引；来源与处理产物位于本地 Artifact 目录。
 
-当前阶段：阶段 0–6 已实现；阶段 6 最终结论为 **PASS WITH NON-BLOCKING RISKS**（Sol 已完成最终复验）。现有实现包含两个 LangGraph（IngestionGraph、QuestionAnswerGraph）、HITL/checkpoint、五工具 MCP Provider、显式配置 MCP Consumer、备份/恢复/派生重建和合成端到端闭环。用户确认后的正文仍只写入 Obsidian Markdown；真实模型、网页、视频和外部 MCP 不属于自动化测试。Playwright 合成闭环已在 GitHub Actions 的 Chromium 环境通过；本机未安装匹配版本的 Playwright Chromium，实际限制以 `docs/STATUS.md` 为准。
+当前阶段：阶段 0–6 已实现；阶段 6 最终结论为 **PASS WITH NON-BLOCKING RISKS**（Sol 已完成最终复验）。现有实现包含两个 LangGraph（IngestionGraph、QuestionAnswerGraph）、HITL/checkpoint、五工具 MCP Provider、显式配置 MCP Consumer、人工合集、只读设置与受控备份/重扫/派生重建。用户确认后的正文仍只写入 Obsidian Markdown；真实模型、网页、视频和外部 MCP 不属于自动化测试。提交 `ba7e247aac0213c85e223bff3238143af16a99f8` 的四个 jobs 是 H3 基线 CI，均通过；H4 新增的 Playwright 合成用例尚未在 CI 执行，本地仅完成 typecheck/list，实际限制以 `docs/STATUS.md` 为准。
 
 ## 本地快速开始
 
@@ -23,11 +23,13 @@ npm --prefix frontend run dev
 
 `VAULT_PATH` 未配置时 API 和首页仍可运行，但发布/监听功能会明确显示未配置。Chat 与 Embedding 是独立 capability：Chat 默认使用 OpenAI-compatible API；Embedding 默认使用进程内 FastEmbed 与中文 `BAAI/bge-small-zh-v1.5`（512 维），模型缓存在被 Git 忽略的 `data/models/`。也可以切换到 OpenAI-compatible Embedding。Embedding 未配置时不允许伪装完成向量发布。
 
+合集页管理 SQLite 中的合集关系，并把人工成员变更同步到受管理 Markdown 的 `collections` Frontmatter；重扫/监听可按 Markdown 主来源收敛关系，删除合集不删除知识正文、Artifact 或向量。设置页只显示严格脱敏的受管理相对目录、五类 Provider 配置状态、RAG/切分参数、视频保留和 FFmpeg 状态；配置仍通过项目根目录 `.env`，页面不接收或显示 API Key、base URL 或绝对路径。FFmpeg 探针与首页使用同一个 `VIDEO_FFMPEG_EXECUTABLE` 配置，未配置只表示视频能力降级。
+
 ## 离线恢复演练与 MCP
 
 恢复只能在 FastAPI、JobRunner、Obsidian watcher 和 workflow checkpoint 使用者全部停止后，由短生命周期 CLI 执行；CLI 不从归档推导目标，也默认拒绝覆盖。以下命令只使用临时目录变量，运行前按实际环境替换路径：
 
-归档路径必须独立于业务/ checkpoint SQLite 主文件及其 `-wal/-shm` sidecar，也不能位于 Artifact 或受管理 Vault 恢复目标内；restore 创建 staging 后还会拒绝与恢复目标发生父子路径碰撞。
+默认备份根目录为 `data/backups/`，该目录已被 Git 忽略。归档路径必须独立于业务/ checkpoint SQLite 主文件及其 `-wal/-shm` sidecar，也不能位于 Artifact 或受管理 Vault 恢复目标内；restore 创建 staging 后还会拒绝与恢复目标发生父子路径碰撞。
 
 ~~~powershell
 $runRoot = Join-Path ([IO.Path]::GetTempPath()) ("zhiliutai-" + [guid]::NewGuid().ToString("N"))
@@ -76,6 +78,8 @@ npm --prefix frontend run e2e
 ~~~
 
 Dockerfile 是交付能力，Docker build 在 GitHub Actions 或具备 Docker 的环境验证，不是本地开发前置条件。Playwright 使用固定版本、127.0.0.1 Vite 服务和稳定合成 API fixture；CI 安装 Chromium 并保存失败产物。本机 runner 的实际限制不会被伪装成通过。
+
+最近一次收口记录：Sol 全量后端为 209 passed，前端为 5 files / 27 tests；H3 基线 CI 提交的四个 jobs 全部通过。H4 的 Playwright fixture 覆盖合集列表/详情/移除成员，以及设置页五类 Provider、FFmpeg 未配置说明和一次合成备份成功响应；H4 尚未在 CI 执行，本地仅完成 typecheck/list，本机真实浏览器执行仍以环境限制登记，不把未运行写成通过。
 
 ## 安全边界
 

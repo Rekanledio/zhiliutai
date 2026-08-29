@@ -340,10 +340,27 @@ Alembic migration。
 
 前端 Playwright 位于 `frontend/tests/e2e/`，只验证浏览器呈现与既有 API 边界，不复制业务逻辑：
 它在固定 `workers=1` 的 127.0.0.1 Vite 服务上用稳定的浏览器内 API fixture 覆盖收件箱提交、
-人工审核、发布到 Obsidian、搜索、证据约束回答和 Citation 卡片。配置保留失败 trace、截图和
-视频；GitHub Actions 在独立 job 中安装锁定版本的 Chromium、运行 E2E typecheck/Playwright 并
-始终上传 `playwright-report`/`test-results`。本机 runner 在收集阶段未完成，不能把本地限制解释成
-浏览器通过。
+人工审核、发布到 Obsidian、合集列表/详情/移除成员、设置页五类 Provider 与一次合成备份、
+搜索、证据约束回答和 Citation 卡片。配置保留失败 trace、截图和视频；GitHub Actions 在独立
+job 中安装锁定版本的 Chromium、运行 E2E typecheck/Playwright 并始终上传
+`playwright-report`/`test-results`。所有未处理的 `/api/**` fixture 请求都会使测试失败。本机 runner
+在收集阶段未完成，不能把本地限制解释成浏览器通过。上述 H4 新增合集/设置 fixture 只完成本地
+typecheck/list，尚未进入 CI；不能把 H3 基线 CI 的结果解释为 H4 三个 E2E 已执行。
+
+## 8.8 阶段 6 H1–H3 的本机功能面
+
+- H1 的健康探针按能力分别报告配置、可达性和降级；首页与设置页的 FFmpeg 探针共同使用
+  `VIDEO_FFMPEG_EXECUTABLE`，默认命令为 `ffmpeg`。远程 Provider 探针只把 2xx 视为成功，
+  认证失败、不可达和超时保持稳定的脱敏状态；FastEmbed 本地能力不会替代远程 Chat/ASR/
+  Vision/Reranker 的验证。
+- H2 的人工合集由 SQLite `Collection`/`CollectionItem` 维护，成员仅来自已发布、current、
+  非删除条目；合集名称列表同时写入受管理 Markdown 的 `collections` Frontmatter。发布、
+  watcher 和 rescan 使用同一 Obsidian/Stage2 边界收敛关系；删除合集只删除关系和 Frontmatter，
+  不删除知识正文、Artifact、ContentVersion 或向量。MOC 首版明确未启用。
+- H3 的设置页只读投影受管理相对目录、五类 Provider 状态、检索/切分参数、媒体保留和 FFmpeg
+  状态，不返回 Vault 绝对路径、base URL 或凭据；配置仍通过项目根 `.env` 并在重启后生效。
+  rescan、backup、rebuild 共用 maintenance/mutation lock，backup 由服务端生成归档 ID 并写入
+  `data/backups/`；restore 仍只允许停止服务后使用显式目标的离线 CLI。
 
 ## 9. Health
 
@@ -368,6 +385,6 @@ Chat、Embedding、ASR、Vision 和 Reranker 的 key 只来自后端 Settings。
 
 Dockerfile 构建 React 后由 FastAPI 托管静态产物，容器启动时执行 SQLite migration。Docker 是 delivery/CI concern，不是本地 prerequisite。`compose.yaml` 已移除。
 
-GitHub Actions 分别执行后端锁定同步、Ruff、pytest、同一临时 SQLite 的 upgrade/downgrade/upgrade，前端 npm ci/typecheck/test/build、Playwright E2E typecheck/Chromium 安装/执行与失败产物上传，以及 Docker build。当前机器没有 Docker，所以本地没有把 Docker build 标记为通过。
+GitHub Actions 分别执行后端锁定同步、Ruff、pytest、同一临时 SQLite 的 upgrade/downgrade/upgrade，前端 npm ci/typecheck/test/build、Playwright E2E typecheck/Chromium 安装/执行与失败产物上传，以及 Docker build。提交 `ba7e247aac0213c85e223bff3238143af16a99f8` 的四个 H3 基线 jobs 均通过；H4 新增 Playwright fixture 尚未在 CI 执行。本机没有 Docker，所以本地没有把 Docker build 标记为通过。
 
 组件自动化使用 Vitest + Testing Library + jsdom。真实浏览器 E2E 将由 Playwright CI 或浏览器能力正常的环境执行；当前 runner 故障不阻塞阶段推进，也不记为通过。
