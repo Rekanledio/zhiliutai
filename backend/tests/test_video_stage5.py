@@ -227,8 +227,13 @@ async def test_ytdlp_adapter_uses_closed_args_and_deterministic_runner(tmp_path:
     ]
     assert executor.calls[0]["requested_url"] == "https://video.example/watch"
     environment = executor.calls[0]["env"]
-    assert environment["HOME"].endswith(".ytdlp-state")
-    assert environment["XDG_CONFIG_HOME"].endswith(".ytdlp-state\\config")
+    state_home = Path(environment["HOME"])
+    config_home = Path(environment["XDG_CONFIG_HOME"])
+    assert state_home.name == ".ytdlp-state"
+    assert config_home.name == "config"
+    assert config_home.parent.name == ".ytdlp-state"
+    assert config_home.parent == state_home
+    assert config_home == state_home / "config"
     assert not any(
         name.casefold() in {
             "http_proxy",
