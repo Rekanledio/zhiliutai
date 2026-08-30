@@ -381,7 +381,7 @@
      IngestionGraph、review/publish HITL、Obsidian Markdown、SQLite/Qdrant 检索、QuestionAnswerGraph
      回答和 MCP 查询；输入、Vault、数据库、向量和 provider 全部是临时/确定性 fixture，不以 mock
      取代后端业务闭环，也不访问真实资源。
-  2. 浏览器门禁使用精确锁定的 `@playwright/test==1.52.0`，固定 `workers=1` 与 127.0.0.1 Vite
+  2. 浏览器门禁使用精确锁定的 `@playwright/test==1.53.0`，固定 `workers=1` 与 127.0.0.1 Vite
      webServer；页面只通过合成 API fixture 验证现有 UI 关键流程，不能在 E2E 中新增第二套业务规则。
      失败保留 trace、screenshot、video，CI 安装 Chromium 后上传产物。
   3. CI 必须覆盖 backend locked sync/Ruff/pytest、同一临时 SQLite 的 upgrade/downgrade/upgrade、
@@ -416,3 +416,55 @@
   不一致风险；修复必须收紧现有 service/adapter 边界，而不是增加第二套业务逻辑。
 - 后果：本机 Playwright runner、真实 Provider/网络/视频互操作和进程级跨存储物理原子性继续是
   明确的非阻塞风险或环境限制；未将未完成的浏览器执行标记为通过。
+
+## ADR-0026：用户批准的可选生产 Provider 采用本地优先与严格图像边界
+
+- 状态：已采纳；2026-08-30 完成本机运行验证
+- 日期：2026-08-30
+- 决策：
+  1. ASR 使用项目依赖内锁定的 `faster-whisper==1.2.1` 与 `medium` 模型，懒加载并串行执行；
+     `auto` 优先 CUDA `int8_float16`，初始化或推理失败才在同一请求内退回 CPU `int8`。模型缓存
+     固定在被 Git 忽略的项目数据目录，应用启动和 health 不触发下载。
+  2. Vision 使用 DeepSeek `deepseek-v4-flash-vision-exp` 的 OpenAI-compatible 图像接口，只接收
+     `VideoService` 提供的关键帧 bytes 并编码为 Base64 data URL；HTTP 禁止重定向和环境代理，
+     有请求/图像大小与超时上限，响应按严格 JSON 解析。不得接受任意远程图片 URL、本地路径，
+     也不得记录 API Key 或完整上游响应。
+  3. 关键帧由现有 FFmpeg 无 shell 固定参数在 Artifact 根内的临时目录按有界间隔生成；默认最多
+     24 帧。路径在执行前后均复核位于受管根内，输出只作为可重建 Artifact。
+  4. Reranker 使用 `sentence-transformers==6.0.0` 和 CPU 上的
+     `BAAI/bge-reranker-v2-m3`，懒加载、串行运行；加载或推理失败继续由既有
+     `HybridRetriever` 捕获并保留 RRF 顺序，不改变 SQLite 对 published/current/非删除状态的
+     最终复核，也不改变证据不足时 Provider 前拒答。
+  5. 三项生产适配器只在配置完整时由 `create_app` 注入现有普通 service，不新增 Graph、业务
+     migration、正文来源或第二套检索/视频逻辑。本地 Provider 的设置状态不伪装成需要 API Key
+     的远程 Provider。
+- 原因：用户明确要求在阶段 6 通过后启用可选 ASR、Vision 与 Reranker；先前 ADR 中“协议未选定”
+  的前提已由明确模型和接口选择替代。实现仍需保持本地优先、秘密隔离、路径授权和可安全降级。
+- 后果：自动化继续只使用 injected loader、MockTransport、合成 bytes 和临时目录；真实模型运行
+  属于本机人工维护验证。Vision 会将明确启用的视频关键帧发送给 DeepSeek，用户应将其视为外部
+  数据处理边界；模型质量、费用、供应商可用性和首次加载耗时不是跨存储一致性保证。
+
+## ADR-0027：收尾产品面复用现有服务边界并以 0007 保存审核建议
+
+- 状态：已采纳、完成实现并通过 Sol 独立复验；结论为 PASS WITH NON-BLOCKING RISKS
+- 日期：2026-08-30
+- 决策：
+  1. 收件箱的文本、Markdown、PDF、DOCX、静态网页和视频入口继续调用现有 source API；浏览器只
+     读取 File bytes/text 或发送 multipart，不接受任意本地路径。批量文件队列在客户端做即时类型/
+     大小校验，逐项提交、取消、保留失败项并显示重复结果。
+  2. 0007 在现有 migration head 0006 之后增加 `Tag`、`KnowledgeItemTag` 和
+     `ContentVersion.suggested_collections_json`。AI 标签/合集只存候选建议；审核编辑复用
+     `Stage2Service`，发布成功后才写正式关系和 Markdown Frontmatter，rescan 再以 Markdown 收敛。
+     不把正文复制到 SQLite，也不修改既有 migration 历史。
+  3. 审核、发布、拒绝和取消继续经由 `IngestionWorkflowCoordinator` 的 interrupt/resume；重复
+     已完成决策返回已有状态，不重复生成 current 版本。已发布 current 版本的重处理拒绝/取消不
+     删除正文或旧 current。
+  4. 知识库编辑使用既有 PATCH service 的 `expected_content_hash` 冲突保护，软删除只改业务状态
+     和派生索引，不删除 Obsidian Markdown。Dashboard/Jobs 只投影安全字段，包括 JobAttempt、
+     心跳、生命周期和脱敏错误摘要；不返回 payload、URL 查询串、路径、密钥或 traceback。
+  5. Playwright 只使用浏览器内合成 API fixture；所有未处理的 `/api/**` 请求立即失败。本轮覆盖
+     6 个场景，CI 先执行清单再安装 Chromium 和运行测试；本机缺浏览器时不把启动失败标记为通过。
+- 原因：产品基线要求正文、发布、检索和安全边界保持单一权威来源；最小 0007 只补足组织元数据和
+  审核候选字段，页面收尾通过既有 application service 与 API 维持同一套幂等、路径和秘密约束。
+- 后果：标签/合集正式关系依赖人工确认，建议字段可随版本重建；本轮本机真实 Playwright 仍受
+  Chromium 未安装限制，CI 或具备浏览器的环境必须重新执行 6 个场景。

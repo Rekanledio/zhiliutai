@@ -6,7 +6,7 @@ import {
   type HealthState,
   getDashboard,
 } from "../services/api";
-import { InboxPage } from "../features/inbox/InboxPage";
+import { InboxPage, type InboxCaptureMode } from "../features/inbox/InboxPage";
 import { JobsPage } from "../features/jobs/JobsPage";
 import { KnowledgePage } from "../features/knowledge/KnowledgePage";
 import { CollectionsPage } from "../features/collections/CollectionsPage";
@@ -55,6 +55,34 @@ const stateTone: Record<HealthState, string> = {
   configured: "is-configured",
   unavailable: "is-unavailable",
 };
+
+const itemStatusLabel: Record<string, string> = {
+  pending_review: "待审核",
+  reviewed: "待发布",
+  published: "已发布",
+  processing: "处理中",
+  failed: "处理失败",
+};
+
+const jobStateLabel: Record<string, string> = {
+  queued: "排队中",
+  running: "处理中",
+  succeeded: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+};
+
+function formatDashboardTime(value: string | null | undefined): string {
+  if (!value) return "时间未知";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? "时间未知"
+    : date.toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function dashboardProgress(value: number): number {
+  return Math.round(Math.max(0, Math.min(1, value)) * 100);
+}
 
 const fallbackHealth: DashboardResponse["health"] = {
   status: "degraded",
@@ -187,9 +215,11 @@ function EmptyPanel({ icon, title, detail }: { icon: string; title: string; deta
 function Overview({
   dashboard,
   onCapture,
+  onNavigate,
 }: {
   dashboard: DashboardResponse;
-  onCapture: (label: string) => void;
+  onCapture: (mode: InboxCaptureMode) => void;
+  onNavigate: (page: PageKey) => void;
 }) {
   const stats = dashboard.stats;
   const serviceHealth = useMemo(() => dashboard.health.components, [dashboard.health.components]);
@@ -217,16 +247,22 @@ function Overview({
           <span className="section-note">确认后才会进入知识库</span>
         </div>
         <div className="capture-grid">
-          <QuickCapture icon="✦" title="粘贴文本" detail="灵感、摘录或一段想法" tone="tone-peach" onClick={() => onCapture("粘贴文本")} />
-          <QuickCapture icon="▧" title="上传文件" detail="Markdown、PDF 或 DOCX" tone="tone-lilac" onClick={() => onCapture("上传文件")} />
-          <QuickCapture icon="⌁" title="添加网页" detail="保存一个静态网页来源" tone="tone-sage" onClick={() => onCapture("添加网页")} />
-          <QuickCapture icon="▶" title="添加视频" detail="字幕优先，之后再处理画面" tone="tone-sand" onClick={() => onCapture("添加视频")} />
+          <QuickCapture icon="✦" title="粘贴文本" detail="灵感、摘录或一段想法" tone="tone-peach" onClick={() => onCapture("text")} />
+          <QuickCapture icon="▧" title="上传文件" detail="Markdown、PDF 或 DOCX" tone="tone-lilac" onClick={() => onCapture("file")} />
+          <QuickCapture icon="⌁" title="添加网页" detail="保存一个静态网页来源" tone="tone-sage" onClick={() => onCapture("url")} />
+          <QuickCapture icon="▶" title="添加视频" detail="字幕优先，之后再处理画面" tone="tone-sand" onClick={() => onCapture("video")} />
         </div>
       </section>
 
       <section className="stats-grid">
         <StatCard label="知识条目" value={String(stats.knowledge_count)} detail="确认后会出现在这里" icon="▤" tone="stat-teal" />
-        <StatCard label="今日新增" value={String(stats.today_added)} detail="今天还没有新内容" icon="＋" tone="stat-peach" />
+        <StatCard
+          label="今日新增"
+          value={String(stats.today_added)}
+          detail={stats.today_added > 0 ? "本地今天已收录" : "今天还没有新内容"}
+          icon="＋"
+          tone="stat-peach"
+        />
         <StatCard label="待确认" value={String(stats.pending_review)} detail="AI 结果不会自动发布" icon="◇" tone="stat-lilac" />
         <StatCard label="处理中" value={String(stats.processing)} detail="任务状态实时可见" icon="◌" tone="stat-sage" />
       </section>
@@ -238,7 +274,7 @@ function Overview({
               <span className="eyebrow">人工确认</span>
               <h2>需要你确认</h2>
             </div>
-            <button className="text-button" type="button" onClick={() => onCapture("审核队列")}>查看队列 <span>↗</span></button>
+            <button className="text-button" type="button" onClick={() => onNavigate("inbox")}>查看队列 <span>↗</span></button>
           </div>
           {dashboard.pending_reviews.length === 0 ? (
             <EmptyPanel icon="✓" title="收件箱很安静" detail="新资料会先停在这里，等你确认摘要、标签和归属。" />
@@ -249,9 +285,9 @@ function Overview({
                   <span className="list-item-marker" />
                   <div>
                     <strong>{item.title ?? "未命名资料"}</strong>
-                    <span>{item.source_type ?? "来源待识别"}</span>
+                    <span>{item.source_type ?? "来源待识别"} · {itemStatusLabel[item.status] ?? item.status}</span>
                   </div>
-                  <button className="ghost-button" type="button">确认</button>
+                  <button className="ghost-button" type="button" onClick={() => onNavigate("inbox")}>确认</button>
                 </div>
               ))}
             </div>
@@ -276,9 +312,24 @@ function Overview({
               <span className="eyebrow">知识脉络</span>
               <h2>最近知识</h2>
             </div>
-            <button className="text-button" type="button">进入知识库 <span>↗</span></button>
+            <button className="text-button" type="button" onClick={() => onNavigate("library")}>进入知识库 <span>↗</span></button>
           </div>
-          <EmptyPanel icon="⌁" title="你的知识会在这里展开" detail="确认后的 Markdown 会保留在 Obsidian，同时出现在知流台的索引里。" />
+          {dashboard.recent_items.length === 0 ? (
+            <EmptyPanel icon="⌁" title="你的知识会在这里展开" detail="确认后的 Markdown 会保留在 Obsidian，同时出现在知流台的索引里。" />
+          ) : (
+            <div className="dashboard-list">
+              {dashboard.recent_items.map((item) => (
+                <button className="dashboard-list-row" key={item.id} type="button" onClick={() => onNavigate("library")}>
+                  <span className="list-item-marker" />
+                  <span className="dashboard-list-copy">
+                    <strong>{item.title}</strong>
+                    <small>{item.source_type} · {itemStatusLabel[item.status] ?? item.status} · {formatDashboardTime(item.updated_at)}</small>
+                  </span>
+                  <span aria-hidden="true">↗</span>
+                </button>
+              ))}
+            </div>
+          )}
         </article>
 
         <article className="content-card jobs-card">
@@ -287,9 +338,23 @@ function Overview({
               <span className="eyebrow">异步处理</span>
               <h2>处理中</h2>
             </div>
-            <button className="text-button" type="button">查看任务 <span>↗</span></button>
+            <button className="text-button" type="button" onClick={() => onNavigate("jobs")}>查看任务 <span>↗</span></button>
           </div>
-          <EmptyPanel icon="◌" title="当前没有后台任务" detail="转录、解析和索引任务会在这里显示阶段和进度。" />
+          {dashboard.processing_jobs.length === 0 ? (
+            <EmptyPanel icon="◌" title="当前没有后台任务" detail="转录、解析和索引任务会在这里显示阶段和进度。" />
+          ) : (
+            <div className="dashboard-list">
+              {dashboard.processing_jobs.map((job) => (
+                <button className="dashboard-list-row dashboard-job-row" key={job.id} type="button" onClick={() => onNavigate("jobs")}>
+                  <span className="dashboard-list-copy">
+                    <strong>{job.kind}</strong>
+                    <small>{jobStateLabel[job.state] ?? job.state} · {job.stage} · {dashboardProgress(job.progress)}%</small>
+                  </span>
+                  <span className="dashboard-job-meta">{formatDashboardTime(job.heartbeat_at ?? job.started_at)}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </article>
       </section>
     </div>
@@ -316,7 +381,7 @@ export default function App() {
   const [dashboard, setDashboard] = useState<DashboardResponse>(() => fallbackDashboard());
   const [loading, setLoading] = useState(true);
   const [apiError, setApiError] = useState<string | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
+  const [inboxMode, setInboxMode] = useState<InboxCaptureMode>("text");
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -335,14 +400,6 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
-
-  useEffect(() => {
-    if (!toast) {
-      return;
-    }
-    const timer = window.setTimeout(() => setToast(null), 2800);
-    return () => window.clearTimeout(timer);
-  }, [toast]);
 
   const activeItem = navItems.find((item) => item.key === activePage) ?? navItems[0];
 
@@ -407,16 +464,18 @@ export default function App() {
         {activePage === "overview" ? (
           <Overview
             dashboard={dashboard}
-            onCapture={(label) => {
-              if (label === "粘贴文本") {
-                setActivePage("inbox");
-              } else {
-                setToast(label);
-              }
+            onCapture={(mode) => {
+              setInboxMode(mode);
+              setActivePage("inbox");
             }}
+            onNavigate={setActivePage}
           />
         ) : activePage === "inbox" ? (
-          <InboxPage onChanged={() => void refresh()} />
+          <InboxPage
+            initialMode={inboxMode}
+            onChanged={() => void refresh()}
+            onNavigate={setActivePage}
+          />
         ) : activePage === "library" ? (
           <KnowledgePage />
         ) : activePage === "jobs" ? (
@@ -432,16 +491,6 @@ export default function App() {
         )}
       </main>
 
-      {toast ? (
-        <div className="toast" role="status">
-          <span className="toast-check">✓</span>
-          <div>
-            <strong>{toast}入口已准备</strong>
-            <span>具体采集流程将在后续阶段接入</span>
-          </div>
-          <button type="button" aria-label="关闭提示" onClick={() => setToast(null)}>×</button>
-        </div>
-      ) : null}
     </div>
   );
 }

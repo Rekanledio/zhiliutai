@@ -26,14 +26,43 @@ export interface DashboardStats {
   processing: number;
 }
 
+export interface DashboardPendingReview {
+  id: string;
+  title: string;
+  source_type: string;
+  status: string;
+  updated_at: string;
+}
+
+export interface DashboardRecentItem {
+  id: string;
+  title: string;
+  source_type: string;
+  status: string;
+  updated_at: string;
+}
+
+export interface DashboardJobSummary {
+  id: string;
+  kind: string;
+  state: ProcessingJob["state"];
+  stage: string;
+  progress: number;
+  heartbeat_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  duration_ms?: number | null;
+  error?: Record<string, unknown> | null;
+}
+
 export interface DashboardResponse {
   greeting: string;
   date_label: string;
   stats: DashboardStats;
   health: HealthResponse;
-  pending_reviews: Array<Record<string, string>>;
-  recent_items: Array<Record<string, string>>;
-  processing_jobs: Array<Record<string, string>>;
+  pending_reviews: DashboardPendingReview[];
+  recent_items: DashboardRecentItem[];
+  processing_jobs: DashboardJobSummary[];
 }
 
 export interface KnowledgeItem {
@@ -49,6 +78,9 @@ export interface KnowledgeItem {
   body?: string | null;
   summary?: string | null;
   suggested_tags: string[];
+  suggested_collections?: string[];
+  confirmed_tags?: string[];
+  collections?: string[];
   version_no?: number | null;
   note_relative_path?: string | null;
   sync_state?: string | null;
@@ -62,6 +94,7 @@ export interface CollectionItem {
   source_type: string;
   version_no: number;
   suggested_tags: string[];
+  confirmed_tags?: string[];
 }
 
 export interface CollectionSummary {
@@ -90,6 +123,38 @@ export interface ProcessingJob {
   result?: Record<string, unknown> | null;
   heartbeat_at?: string | null;
   created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  duration_ms?: number | null;
+  attempts: JobAttempt[];
+}
+
+export interface JobAttempt {
+  id: string;
+  attempt_no: number;
+  state: "running" | "succeeded" | "failed" | "cancelled";
+  stage: string;
+  started_at: string;
+  heartbeat_at?: string | null;
+  finished_at?: string | null;
+  duration_ms?: number | null;
+  error?: Record<string, unknown> | null;
+}
+
+export interface ItemFilters {
+  status?: string;
+  sourceType?: string;
+  tag?: string;
+  collection?: string;
+  createdAfter?: string;
+  createdBefore?: string;
+  signal?: AbortSignal;
+}
+
+export interface SubmissionResponse {
+  item_id: string;
+  job_id: string;
+  deduplicated: boolean;
 }
 
 export interface ObsidianStatus {
@@ -104,7 +169,11 @@ export type SettingsHealthState = HealthState;
 
 export interface ProviderSettings {
   capability: "chat" | "embedding" | "asr" | "vision" | "reranker";
-  provider_kind: "openai-compatible" | "fastembed";
+  provider_kind:
+    | "openai-compatible"
+    | "fastembed"
+    | "faster-whisper"
+    | "sentence-transformers";
   configured: boolean;
   credential_configured: boolean;
   model: string | null;
@@ -339,6 +408,10 @@ export class ApiError extends Error {
 
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? "";
 
+function resourcePathSegment(value: string): string {
+  return encodeURIComponent(value);
+}
+
 function clientRequestId(): string {
   const raw =
     typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -379,13 +452,19 @@ export async function requestJson<T>(
   externalSignal?.addEventListener("abort", cancel, { once: true });
   const timeout = window.setTimeout(() => controller.abort("timeout"), timeoutMs);
   try {
+    if (externalSignal?.aborted) {
+      throw new ApiError("请求已取消", null, "request_cancelled", null);
+    }
+    const isFormData =
+      typeof FormData !== "undefined" && init.body instanceof FormData;
+    const isJsonBody = typeof init.body === "string";
     const response = await fetch(apiBase + path, {
       ...init,
       signal: controller.signal,
       headers: {
         Accept: "application/json",
         "X-Request-ID": clientRequestId(),
-        ...(init.body ? { "Content-Type": "application/json" } : {}),
+        ...(isJsonBody && !isFormData ? { "Content-Type": "application/json" } : {}),
         ...init.headers,
       },
     });
@@ -468,7 +547,13 @@ function openTarget(target: string, unavailableMessage: string, code: string): v
 export async function openArtifact(
   artifactId: string,
   page?: number,
-  options: { startMs?: number; endMs?: number; keyframeId?: string } = {},
+  options: {
+    startMs?: number;
+    endMs?: number;
+    keyframeId?: string;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  } = {},
 ): Promise<void> {
   if (!/^[A-Za-z0-9-]{1,80}$/.test(artifactId)) {
     throw new ApiError("来源文件链接无效", null, "invalid_artifact_target", null);
@@ -476,10 +561,22 @@ export async function openArtifact(
   if (page !== undefined && (!Number.isInteger(page) || page < 1)) {
     throw new ApiError("来源页码无效", null, "invalid_artifact_target", null);
   }
-  const path = "/api/artifacts/" + encodeURIComponent(artifactId);
+  const path = "/api/artifacts/" + resourcePathSegment(artifactId);
+  const controller = new AbortController();
+  const externalSignal = options.signal;
+  const cancel = () => controller.abort(externalSignal?.reason);
+  externalSignal?.addEventListener("abort", cancel, { once: true });
+  const timeout = window.setTimeout(
+    () => controller.abort("timeout"),
+    options.timeoutMs ?? 5_000,
+  );
   try {
+    if (externalSignal?.aborted) {
+      throw new ApiError("请求已取消", null, "request_cancelled", null);
+    }
     const response = await fetch(apiBase + path, {
       method: "HEAD",
+      signal: controller.signal,
       headers: {
         Accept: "application/octet-stream",
         "X-Request-ID": clientRequestId(),
@@ -492,7 +589,19 @@ export async function openArtifact(
     if (error instanceof ApiError) {
       throw error;
     }
+    if (controller.signal.aborted) {
+      const timedOut = controller.signal.reason === "timeout";
+      throw new ApiError(
+        timedOut ? "来源文件检查超时，请稍后重试" : "请求已取消",
+        null,
+        timedOut ? "request_timeout" : "request_cancelled",
+        null,
+      );
+    }
     throw new ApiError("来源文件不可访问", null, "artifact_unavailable", null);
+  } finally {
+    window.clearTimeout(timeout);
+    externalSignal?.removeEventListener("abort", cancel);
   }
   const fragment =
     page !== undefined
@@ -548,7 +657,7 @@ export async function getVideoCitation(
   }
   const suffix = query.toString() ? "?" + query.toString() : "";
   const preview = await requestJson<VideoCitationPreview>(
-    "/api/artifacts/" + encodeURIComponent(artifactId) + "/locator" + suffix,
+    "/api/artifacts/" + resourcePathSegment(artifactId) + "/locator" + suffix,
   );
   if (
     !preview ||
@@ -683,11 +792,12 @@ export async function streamChat(
     while (true) {
       const next = await reader.read();
       buffer += decoder.decode(next.value, { stream: !next.done });
-      let separator = buffer.indexOf("\n\n");
-      while (separator >= 0) {
+      let separatorMatch = /\r?\n\r?\n/.exec(buffer);
+      while (separatorMatch && separatorMatch.index !== undefined) {
+        const separator = separatorMatch.index;
         emitFrame(buffer.slice(0, separator));
-        buffer = buffer.slice(separator + 2);
-        separator = buffer.indexOf("\n\n");
+        buffer = buffer.slice(separator + separatorMatch[0].length);
+        separatorMatch = /\r?\n\r?\n/.exec(buffer);
       }
       if (next.done) {
         if (buffer.trim()) {
@@ -746,12 +856,62 @@ export function createBackup(): Promise<SettingsBackupResponse> {
 export function submitText(
   content: string,
   sourceType: "text" | "markdown",
-  signal?: AbortSignal,
-): Promise<{ item_id: string; job_id: string; deduplicated: boolean }> {
+  options: SubmitOptions | AbortSignal = {},
+): Promise<SubmissionResponse> {
+  const resolved: SubmitOptions =
+    typeof AbortSignal !== "undefined" && options instanceof AbortSignal
+      ? { signal: options }
+      : (options as SubmitOptions);
   return requestJson("/api/sources/text", {
     method: "POST",
-    body: JSON.stringify({ content, source_type: sourceType }),
-    signal,
+    body: JSON.stringify({
+      content,
+      source_type: sourceType,
+      title: resolved.title || undefined,
+      idempotency_key: resolved.idempotencyKey || undefined,
+    }),
+    signal: resolved.signal,
+  });
+}
+
+export interface SubmitOptions {
+  title?: string;
+  idempotencyKey?: string;
+  signal?: AbortSignal;
+}
+
+export function submitUrl(
+  url: string,
+  options: SubmitOptions = {},
+): Promise<SubmissionResponse> {
+  return requestJson("/api/sources/url", {
+    method: "POST",
+    body: JSON.stringify({
+      url,
+      title: options.title || undefined,
+      idempotency_key: options.idempotencyKey || undefined,
+    }),
+    signal: options.signal,
+  });
+}
+
+export function submitFile(
+  file: File,
+  options: SubmitOptions = {},
+): Promise<SubmissionResponse> {
+  const formData = new FormData();
+  const safeName = file.name.split(/[\\/]/).pop() || "upload";
+  formData.append("file", file, safeName);
+  if (options.title) {
+    formData.append("title", options.title);
+  }
+  if (options.idempotencyKey) {
+    formData.append("idempotency_key", options.idempotencyKey);
+  }
+  return requestJson("/api/sources/files", {
+    method: "POST",
+    body: formData,
+    signal: options.signal,
   });
 }
 
@@ -783,35 +943,72 @@ export function getJobs(signal?: AbortSignal): Promise<ProcessingJob[]> {
 }
 
 export function getJob(id: string, signal?: AbortSignal): Promise<ProcessingJob> {
-  return requestJson("/api/jobs/" + id, { signal });
+  return requestJson("/api/jobs/" + resourcePathSegment(id), { signal });
 }
 
 export function retryJob(id: string): Promise<ProcessingJob> {
-  return requestJson("/api/jobs/" + id + "/retry", { method: "POST" });
+  return requestJson("/api/jobs/" + resourcePathSegment(id) + "/retry", { method: "POST" });
 }
 
 export function cancelJob(id: string): Promise<ProcessingJob> {
-  return requestJson("/api/jobs/" + id + "/cancel", { method: "POST" });
+  return requestJson("/api/jobs/" + resourcePathSegment(id) + "/cancel", { method: "POST" });
 }
 
-export function getItems(status?: string, signal?: AbortSignal): Promise<KnowledgeItem[]> {
-  const query = status ? "?status=" + encodeURIComponent(status) : "";
-  return requestJson("/api/items" + query, { signal });
+export function getItems(
+  options?: ItemFilters | string,
+  legacySignal?: AbortSignal,
+): Promise<KnowledgeItem[]> {
+  const filters: ItemFilters =
+    typeof options === "string" ? { status: options, signal: legacySignal } : options ?? {};
+  const params = new URLSearchParams();
+  if (filters.status) params.set("status", filters.status);
+  if (filters.sourceType) params.set("source_type", filters.sourceType);
+  if (filters.tag) params.set("tag", filters.tag);
+  if (filters.collection) params.set("collection", filters.collection);
+  if (filters.createdAfter) params.set("created_after", filters.createdAfter);
+  if (filters.createdBefore) params.set("created_before", filters.createdBefore);
+  const query = params.toString() ? "?" + params.toString() : "";
+  return requestJson("/api/items" + query, { signal: filters.signal });
 }
 
 export function getItem(id: string, signal?: AbortSignal): Promise<KnowledgeItem> {
-  return requestJson("/api/items/" + id, { signal });
+  return requestJson("/api/items/" + resourcePathSegment(id), { signal });
 }
 
-export function reviewItem(id: string): Promise<KnowledgeItem> {
-  return requestJson("/api/items/" + id + "/review", {
+export interface ReviewOptions {
+  decision?: "approve" | "reject" | "cancel";
+  title?: string;
+  body?: string;
+  summary?: string;
+  suggestedTags?: string[];
+  suggestedCollections?: string[];
+}
+
+export function reviewItem(id: string, options: ReviewOptions = {}): Promise<KnowledgeItem> {
+  const body = {
+    ...(options.decision ? { decision: options.decision } : { approved: true }),
+    ...(options.title !== undefined ? { title: options.title } : {}),
+    ...(options.body !== undefined ? { body: options.body } : {}),
+    ...(options.summary !== undefined ? { summary: options.summary } : {}),
+    ...(options.suggestedTags !== undefined ? { suggested_tags: options.suggestedTags } : {}),
+    ...(options.suggestedCollections !== undefined
+      ? { suggested_collections: options.suggestedCollections }
+      : {}),
+  };
+  return requestJson("/api/items/" + resourcePathSegment(id) + "/review", {
     method: "POST",
-    body: JSON.stringify({ approved: true }),
+    body: JSON.stringify(body),
   });
 }
 
-export function publishItem(id: string): Promise<KnowledgeItem> {
-  return requestJson("/api/items/" + id + "/publish", { method: "POST" });
+export function publishItem(
+  id: string,
+  decision?: "approve" | "reject" | "cancel",
+): Promise<KnowledgeItem> {
+  return requestJson("/api/items/" + resourcePathSegment(id) + "/publish", {
+    method: "POST",
+    ...(decision ? { body: JSON.stringify({ decision }) } : {}),
+  });
 }
 
 export function getObsidianStatus(signal?: AbortSignal): Promise<ObsidianStatus> {
@@ -823,11 +1020,40 @@ export function rescanObsidian(): Promise<Record<string, number>> {
 }
 
 export function openObsidian(id: string): Promise<{ uri: string }> {
-  return requestJson("/api/obsidian/open/" + id, { method: "POST" });
+  return requestJson("/api/obsidian/open/" + resourcePathSegment(id), { method: "POST" });
+}
+
+export interface ItemPatchOptions {
+  title?: string;
+  body?: string;
+  expectedContentHash?: string;
+}
+
+export function patchItem(id: string, options: ItemPatchOptions): Promise<KnowledgeItem> {
+  return requestJson("/api/items/" + resourcePathSegment(id), {
+    method: "PATCH",
+    body: JSON.stringify({
+      ...(options.title !== undefined ? { title: options.title } : {}),
+      ...(options.body !== undefined ? { body: options.body } : {}),
+      ...(options.expectedContentHash !== undefined
+        ? { expected_content_hash: options.expectedContentHash }
+        : {}),
+    }),
+  });
+}
+
+export function reprocessItem(id: string): Promise<SubmissionResponse> {
+  return requestJson("/api/items/" + resourcePathSegment(id) + "/reprocess", {
+    method: "POST",
+  });
+}
+
+export function deleteItem(id: string): Promise<void> {
+  return requestJson("/api/items/" + resourcePathSegment(id), { method: "DELETE" });
 }
 
 function collectionPath(id: string): string {
-  return "/api/collections/" + encodeURIComponent(id);
+  return "/api/collections/" + resourcePathSegment(id);
 }
 
 export function getCollections(signal?: AbortSignal): Promise<CollectionSummary[]> {

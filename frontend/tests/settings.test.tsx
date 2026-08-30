@@ -29,10 +29,10 @@ const settingsResponse = {
     },
     asr: {
       capability: "asr",
-      provider_kind: "openai-compatible",
-      configured: false,
+      provider_kind: "faster-whisper",
+      configured: true,
       credential_configured: false,
-      model: null,
+      model: "medium",
     },
     vision: {
       capability: "vision",
@@ -43,10 +43,10 @@ const settingsResponse = {
     },
     reranker: {
       capability: "reranker",
-      provider_kind: "openai-compatible",
-      configured: false,
+      provider_kind: "sentence-transformers",
+      configured: true,
       credential_configured: false,
-      model: null,
+      model: "BAAI/bge-reranker-v2-m3",
     },
   },
   retrieval: {
@@ -132,6 +132,8 @@ describe("设置页面", () => {
     expect(screen.getByRole("heading", { level: 3, name: "ASR" })).toBeTruthy();
     expect(screen.getByRole("heading", { level: 3, name: "Vision" })).toBeTruthy();
     expect(screen.getByRole("heading", { level: 3, name: "Reranker" })).toBeTruthy();
+    expect(screen.getByText("Faster Whisper")).toBeTruthy();
+    expect(screen.getByText("Sentence Transformers")).toBeTruthy();
     expect(screen.getByText("FFmpeg 未配置只影响视频能力；请稍后按人工步骤安装。")).toBeTruthy();
     expect(
       screen.getAllByText("配置状态不等于已验证；运行验证请查看首页实时探针。"),

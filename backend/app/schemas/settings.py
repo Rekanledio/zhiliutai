@@ -10,7 +10,12 @@ SettingsHealthState = Literal[
 ]
 
 ProviderCapability = Literal["chat", "embedding", "asr", "vision", "reranker"]
-ProviderKind = Literal["openai-compatible", "fastembed"]
+ProviderKind = Literal[
+    "openai-compatible",
+    "fastembed",
+    "faster-whisper",
+    "sentence-transformers",
+]
 
 
 class ProviderSettingsResponse(BaseModel):

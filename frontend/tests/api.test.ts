@@ -3,9 +3,16 @@ import { afterEach, expect, test, vi } from "vitest";
 import {
   ApiError,
   cancelJob,
+  getCollection,
+  getItem,
+  getJob,
   getVideoCitation,
+  openObsidian,
   openArtifact,
+  publishItem,
   requestJson,
+  retryJob,
+  reviewItem,
   streamChat,
   submitVideo,
 } from "../src/services/api";
@@ -108,6 +115,33 @@ test("Artifact target reports unavailable and blocked destinations", async () =>
   open.mockRestore();
 });
 
+test("Artifact HEAD check obeys a strict timeout and external AbortSignal", async () => {
+  const fetchMock = vi.fn((_url: string, init: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      init.signal?.addEventListener(
+        "abort",
+        () => reject(new DOMException("aborted", "AbortError")),
+        { once: true },
+      );
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  await expect(openArtifact("artifact-1", undefined, { timeoutMs: 5 })).rejects.toMatchObject<
+    Partial<ApiError>
+  >({ code: "request_timeout" });
+
+  const external = new AbortController();
+  const pending = openArtifact("artifact-1", undefined, {
+    signal: external.signal,
+    timeoutMs: 1_000,
+  });
+  external.abort();
+  await expect(pending).rejects.toMatchObject<Partial<ApiError>>({
+    code: "request_cancelled",
+  });
+});
+
 test("视频 citation 使用本机 locator API 返回字幕和关键帧定位", async () => {
   const fetchMock = vi.fn(async (url: string) => {
     if (url === "/api/artifacts/transcript-1/locator?start_ms=120&end_ms=900") {
@@ -201,6 +235,73 @@ test("SSE parser rejects citations before meta and delta", async () => {
   await expect(
     streamChat("合成问题", { onEvent: vi.fn(), timeoutMs: 1_000 }),
   ).rejects.toMatchObject<Partial<ApiError>>({ code: "invalid_stream_order" });
+});
+
+test("SSE parser accepts both LF and CRLF frame delimiters", async () => {
+  const events: string[] = [];
+  const frames = [
+    'event: meta\r\ndata: {"evidence":{"status":"sufficient"}}',
+    'event: delta\r\ndata: {"text":"合成回答","citation_ids":[]}',
+    'event: citations\r\ndata: {"citations":[]}',
+    'event: done\r\ndata: {"answer":"合成回答","conflicts":[]}',
+  ].join("\r\n\r\n") + "\r\n\r\n";
+  const bytes = new TextEncoder().encode(frames);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ "Content-Type": "text/event-stream" }),
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes);
+          controller.close();
+        },
+      }),
+    })),
+  );
+
+  await streamChat("合成问题", {
+    timeoutMs: 1_000,
+    onEvent: (event) => events.push(event.event),
+  });
+  expect(events).toEqual(["meta", "delta", "citations", "done"]);
+});
+
+test("动态资源 ID 在所有主要 API 路径中都进行 URL 编码", async () => {
+  const urls: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      urls.push(url);
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        json: async () => ({}),
+      };
+    }),
+  );
+
+  await getJob("job/id");
+  await retryJob("retry/id");
+  await cancelJob("cancel/id");
+  await getItem("item/id");
+  await reviewItem("review/id");
+  await publishItem("publish/id");
+  await openObsidian("obsidian/id");
+  await getCollection("collection/id");
+
+  expect(urls).toEqual([
+    "/api/jobs/job%2Fid",
+    "/api/jobs/retry%2Fid/retry",
+    "/api/jobs/cancel%2Fid/cancel",
+    "/api/items/item%2Fid",
+    "/api/items/review%2Fid/review",
+    "/api/items/publish%2Fid/publish",
+    "/api/obsidian/open/obsidian%2Fid",
+    "/api/collections/collection%2Fid",
+  ]);
 });
 
 test("视频提交只发送允许的来源字段", async () => {

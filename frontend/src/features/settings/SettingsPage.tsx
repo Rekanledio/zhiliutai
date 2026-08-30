@@ -33,6 +33,8 @@ const stateLabels: Record<SettingsHealthState, string> = {
 const providerKinds: Record<ProviderSettings["provider_kind"], string> = {
   "openai-compatible": "OpenAI-compatible",
   fastembed: "FastEmbed",
+  "faster-whisper": "Faster Whisper",
+  "sentence-transformers": "Sentence Transformers",
 };
 
 const sensitiveText = /(?:api[_ -]?key|authorization|bearer|cookie|set[-_ ]?cookie|token|secret|password)\s*[:=]\s*\S|bearer\s+\S|traceback|stack\s+trace/i;
@@ -206,7 +208,12 @@ function isSafeSettings(value: unknown): value is SettingsResponse {
       (provider) =>
         !provider ||
         provider.capability !== providerKeys[providerEntries.indexOf(provider)] ||
-        !["openai-compatible", "fastembed"].includes(provider.provider_kind) ||
+        ![
+          "openai-compatible",
+          "fastembed",
+          "faster-whisper",
+          "sentence-transformers",
+        ].includes(provider.provider_kind) ||
         typeof provider.configured !== "boolean" ||
         typeof provider.credential_configured !== "boolean" ||
         (provider.model !== null && !safeModel(provider.model)),

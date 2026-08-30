@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
 
 BACKUP_FORMAT_VERSION = 1
-HEAD_SCHEMA_REVISION = "0006_collections"
+HEAD_SCHEMA_REVISION = "0007_tags_and_review_suggestions"
 MANIFEST_NAME = "manifest.json"
 DATABASE_MEMBER = "data/business.sqlite"
 CHECKPOINT_MEMBER = "data/checkpoint.sqlite"

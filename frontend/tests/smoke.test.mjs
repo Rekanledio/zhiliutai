@@ -273,7 +273,7 @@ describe("阶段 1/2 React 工作台", () => {
     fireEvent.click(screen.getByRole("button", { name: "Markdown" }));
     fireEvent.click(screen.getByRole("button", { name: "提交到收件箱" }));
     expect(await screen.findByText("阶段 2 草稿")).toBeTruthy();
-    expect(screen.getByText("任务状态：succeeded")).toBeTruthy();
+    expect(screen.getByText("任务状态：已完成")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "审核通过" }));
     expect(await screen.findByRole("button", { name: "发布到 Obsidian" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "发布到 Obsidian" }));

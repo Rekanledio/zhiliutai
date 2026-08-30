@@ -128,6 +128,7 @@ class ContentVersion(Base):
     content_hash: Mapped[str] = mapped_column(String(64), index=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     suggested_tags_json: Mapped[str] = mapped_column(Text, default="[]")
+    suggested_collections_json: Mapped[str] = mapped_column(Text, default="[]")
     prompt_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
     source_metadata_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -317,6 +318,40 @@ class CollectionItem(Base):
     )
     knowledge_item_id: Mapped[str] = mapped_column(
         ForeignKey("knowledge_items.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class Tag(Base):
+    """A confirmed, reusable tag name; it never stores knowledge正文."""
+
+    __tablename__ = "tags"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(80))
+    normalized_name: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class KnowledgeItemTag(Base):
+    """Confirmed item/tag metadata relation."""
+
+    __tablename__ = "knowledge_item_tags"
+    __table_args__ = (
+        UniqueConstraint(
+            "knowledge_item_id", "tag_id", name="uq_knowledge_item_tag"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    knowledge_item_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_items.id", ondelete="CASCADE"), index=True
+    )
+    tag_id: Mapped[str] = mapped_column(
+        ForeignKey("tags.id", ondelete="CASCADE"), index=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 

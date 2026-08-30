@@ -1,7 +1,7 @@
 import asyncio
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import httpx
@@ -20,6 +20,7 @@ class DraftResult:
     summary: str
     suggested_tags: list[str]
     prompt_version: str
+    suggested_collections: list[str] = field(default_factory=list)
 
 
 class DraftProvider(Protocol):
@@ -46,7 +47,8 @@ class OpenAICompatibleDraftProvider:
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         prompt = (
             "请整理以下个人知识输入。保留事实，不扩写未知信息。"
-            "返回 JSON：title, body, summary, suggested_tags（字符串数组）。\n\n" + content
+            "返回 JSON：title, body, summary, suggested_tags（字符串数组），"
+            "suggested_collections（字符串数组）。\n\n" + content
         )
         async with httpx.AsyncClient(timeout=60, follow_redirects=False) as client:
             response = await client.post(
@@ -68,6 +70,10 @@ class OpenAICompatibleDraftProvider:
             summary=str(parsed.get("summary") or ""),
             suggested_tags=[str(tag) for tag in parsed.get("suggested_tags", [])],
             prompt_version="stage2-draft-v1",
+            suggested_collections=[
+                str(collection)
+                for collection in parsed.get("suggested_collections", [])
+            ],
         )
 
 

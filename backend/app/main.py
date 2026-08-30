@@ -36,11 +36,16 @@ from app.providers.models import (
     PassthroughDraftProvider,
     ProviderNotConfigured,
 )
+from app.providers.capabilities import (
+    FasterWhisperASRProvider,
+    FfmpegKeyframeSampler,
+    OpenAICompatibleVisionProvider,
+)
 from app.providers.rag import OpenAICompatibleRagChatProvider, RagChatProvider
 from app.providers.video import ASRProvider, OCRProvider, SceneDetector, VideoSourceProvider, VisionProvider
 from app.rag.citations import CitationBuilder
 from app.rag.question_answer import QuestionAnswerService
-from app.rag.reranking import RerankerProvider
+from app.rag.reranking import RerankerProvider, SentenceTransformersReranker
 from app.rag.retrieval import HybridRetriever
 from app.services.backup import BackupRestoreService
 from app.services.jobs import JobRunner
@@ -125,6 +130,35 @@ def create_app(
             rag_chat_provider = OpenAICompatibleRagChatProvider(resolved_settings)
         except ProviderNotConfigured:
             rag_chat_provider = None
+    if asr_provider is None and resolved_settings.asr_provider == "faster-whisper":
+        try:
+            asr_provider = FasterWhisperASRProvider(resolved_settings)
+        except ProviderNotConfigured:
+            asr_provider = None
+    if vision_provider is None:
+        try:
+            vision_provider = OpenAICompatibleVisionProvider(resolved_settings)
+        except ProviderNotConfigured:
+            vision_provider = None
+    if scene_detector is None and vision_provider is not None:
+        scene_detector = FfmpegKeyframeSampler(
+            resolved_settings.artifact_root,
+            executable=resolved_settings.video_ffmpeg_executable,
+            interval_seconds=resolved_settings.video_vision_keyframe_interval_seconds,
+            configured_max_keyframes=resolved_settings.video_vision_max_keyframes,
+            timeout_seconds=resolved_settings.video_fetch_timeout,
+        )
+    if (
+        reranker is None
+        and resolved_settings.reranker_provider == "sentence-transformers"
+        and resolved_settings.reranker_model
+    ):
+        reranker = SentenceTransformersReranker(
+            resolved_settings.reranker_model,
+            device=resolved_settings.reranker_device,
+            cache_path=resolved_settings.reranker_cache_path,
+            local_files_only=resolved_settings.reranker_local_files_only,
+        )
     stage2 = Stage2Service(
         resolved_settings,
         session_factory,

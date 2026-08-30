@@ -80,7 +80,8 @@ def _provider(
 ) -> ProviderSettingsResponse:
     safe_model = _safe_model_identifier(model)
     configured = safe_model is not None and (
-        provider_kind == "fastembed" or _safe_endpoint(base_url)
+        provider_kind in {"fastembed", "faster-whisper", "sentence-transformers"}
+        or _safe_endpoint(base_url)
     )
     return ProviderSettingsResponse(
         capability=capability,  # type: ignore[arg-type]
@@ -159,21 +160,21 @@ def build_settings_response(
             ),
             asr=_provider(
                 "asr",
-                "openai-compatible",
+                settings.asr_provider,
                 model=settings.asr_model,
                 base_url=settings.asr_base_url,
                 api_key=settings.asr_api_key,
             ),
             vision=_provider(
                 "vision",
-                "openai-compatible",
+                settings.vision_provider,
                 model=settings.vision_model,
                 base_url=settings.vision_base_url,
                 api_key=settings.vision_api_key,
             ),
             reranker=_provider(
                 "reranker",
-                "openai-compatible",
+                settings.reranker_provider,
                 model=settings.reranker_model,
                 base_url=settings.reranker_base_url,
                 api_key=settings.reranker_api_key,

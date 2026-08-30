@@ -52,16 +52,18 @@ Chat 与 Embedding 是独立 capability。默认 Chat adapter 使用 OpenAI-comp
   `metadata_json`、`retention_policy`、`retention_expires_at`、`cleanup_state` 和
   `cleaned_at`，并以 `ix_source_artifacts_cleanup_due` 支持到期清理查询；
   `until_expiry` 必须有非 NULL 的 `retention_expires_at`。
-- `ContentVersion`：草稿/Vault 派生版本、摘要、标签建议和 Prompt 版本。
+- `ContentVersion`：草稿/Vault 派生版本、摘要、标签/合集建议和 Prompt 版本；候选建议在审核发布前不形成正式关系。
 - `NoteBinding`：`zhiliu_id`、Vault 相对路径、内容哈希与同步状态。
 - `Chunk`：SQLite 中的可追踪文本与引用定位；向量写入 Qdrant。
 - `ProcessingJob` / `JobAttempt`：持久状态、进度、心跳、重试、结构化错误和失败历史。
 - `ModelRun`：记录 RAG provider、Prompt、参数、输入/输出快照、Token、耗时和安全错误码。
 - `Citation`：记录一次回答使用的 Chunk、内容哈希、ContentVersion、locator、target 和检索分数快照。
 
-`Tag` 仍会在对应后续业务阶段落地；`Collection` 与 `CollectionItem` 已在阶段 6 批次 D
-通过 0006 最小关系模型落地，供受控 MCP 查询使用。`Citation` 已在阶段 4 作为问答审计快照
-落地，不形成用户可编辑正文主库。
+`Tag`/`KnowledgeItemTag` 已由 0007 最小关系模型落地；`ContentVersion` 的标签和合集字段只保存
+候选建议，只有通过现有审核/发布 service 后才写入正式标签关系或 `CollectionItem`。确认后的
+标签/合集同时表达在受管理 Markdown 的 Frontmatter，watcher/rescan 可从 Markdown 重新收敛。
+`Collection` 与 `CollectionItem` 已由 0006 落地，供合集页面和受控 MCP 查询使用。`Citation` 已在
+阶段 4 作为问答审计快照落地，不形成用户可编辑正文主库。
 
 ## 4. JobRunner
 
@@ -141,13 +143,15 @@ URL 或路径。POST /api/chat/stream 在完整问答结果准备好后按 meta�
 done 顺序发送事件，前端也拒绝乱序流。ModelRun/Citation 是脱敏审计快照，不是用户
 确认正文主库。阶段 4 不引入完整 LangGraph/QuestionAnswerGraph。
 
-RerankerProvider 只是可注入的普通 Protocol；未配置或失败时保留 RRF 并返回降级诊断。
-当前只提供本地确定性 keyword-overlap 参考实现和固定中文离线评测，不伪造生产 HTTP
-协议。
+RerankerProvider 是可注入的普通 Protocol；未配置或失败时保留 RRF 并返回降级诊断。
+用户批准的可选生产实现通过 CPU `BAAI/bge-reranker-v2-m3` 接入；本地模型只改变候选顺序，
+不能绕过 SQLite 状态复核、证据门禁或 Citation 归属校验。keyword-overlap 仍只用于确定性测试。
 
 ## 8. Provider 与 Graph 边界
 
-Chat、Embedding、ASR、Vision、Reranker 是独立 capability。阶段 2 使用 Chat 与 Embedding；测试注入确定性 provider，不读取真实 secret。
+Chat、Embedding、ASR、Vision、Reranker 是独立 capability。阶段 2 使用 Chat 与 Embedding；
+可选生产 ASR/Vision/Reranker 仍由 `create_app` 注入既有 service，测试使用 fake loader 和
+MockTransport，不读取真实 secret 或加载真实模型。
 
 阶段 5 的视频处理仍由普通 application service 和 JobRunner 编排，不引入新的 Graph。
 `POST /api/sources/video` 只接收 `VideoSourceRequest` 的 URL、标题、语言、幂等键和视觉
@@ -181,6 +185,9 @@ Chat、Embedding、ASR、Vision、Reranker 是独立 capability。阶段 2 使�
    关键帧、`VisionProvider` 和可选 `OCRProvider`；访谈/播客跳过。转录、章节、关键帧和
    视觉事件共用非负整数毫秒时间线，manifest 在持久化前做时长、顺序、文本和引用校验。
    Provider/model 只记录标识和版本，不承载密钥。
+5. 本地 ASR 使用懒加载 faster-whisper，并在受控音频 bytes 上串行推理；CUDA 失败可退回 CPU。
+   Vision 的 FFmpeg sampler 只在 Artifact 根内的临时目录生成固定上限关键帧，远程适配器仅发送
+   Base64 data URL，禁止任意远程图片 URL、本地路径、重定向和环境代理。完整上游响应不持久化。
 
 处理结果按 `subtitle_ready`、`asr_complete` 或 `asr_required` 标记。来源 URL、媒体、字幕、
 转录、关键帧和 manifest 都使用内容哈希、生成的内部相对路径和 0004 保留字段；网络媒体
@@ -334,26 +341,27 @@ Alembic migration。
 采集、JobRunner/IngestionGraph、review/publish HITL、临时 Obsidian Markdown、SQLite/Qdrant
 检索和 QuestionAnswerGraph SSE，再使用批次 D 的 MCP Server memory transport 查询同一已发布
 条目。测试使用确定性 draft/embedding/chat provider，不连接真实网页、模型、Vault 或外部 MCP。
-上述阶段 6 实现及本轮 P1 修复已由 Sol 完成最终独立复验，结论为 **PASS WITH NON-BLOCKING RISKS**。
+上述既有阶段 6 实现及本轮产品收尾均经 Sol 独立复验，结论为 **PASS WITH NON-BLOCKING RISKS**。
 本机 Playwright runner 的挂起、真实外部互操作和跨存储物理事务仍按非阻塞风险登记，不能把未完成
 的本机浏览器执行写成通过。
 
 前端 Playwright 位于 `frontend/tests/e2e/`，只验证浏览器呈现与既有 API 边界，不复制业务逻辑：
-它在固定 `workers=1` 的 127.0.0.1 Vite 服务上用稳定的浏览器内 API fixture 覆盖收件箱提交、
-人工审核、发布到 Obsidian、合集列表/详情/移除成员、设置页五类 Provider 与一次合成备份、
-搜索、证据约束回答和 Citation 卡片。配置保留失败 trace、截图和视频；GitHub Actions 在独立
-job 中安装锁定版本的 Chromium、运行 E2E typecheck/Playwright 并始终上传
-`playwright-report`/`test-results`。所有未处理的 `/api/**` fixture 请求都会使测试失败。本机 runner
-在本机收集/执行阶段仍受 Chromium 环境限制，不能把本地限制解释成浏览器通过。H4 代码/测试
-提交 `5995efb0f39732b175994cdb7d450e8c2eccf144` 的 run `33281127978` 已在 CI Chromium 执行
-这 3 个合成 E2E；`ba7e247aac0213c85e223bff3238143af16a99f8` 仍仅是 H3 基线证据。
+它在固定 `workers=1` 的 127.0.0.1 Vite 服务上用稳定的浏览器内 API fixture 覆盖文本/Markdown、
+MD/TXT/PDF/DOCX 文件队列、静态网页、视频、人工审核编辑与 approve/reject/cancel/publish、
+知识库筛选/编辑冲突/reprocess/软删除、Dashboard/Jobs 恢复、合集、设置备份、搜索、证据拒答、
+证据约束回答和 Citation 卡片。配置保留失败 trace、截图和视频；GitHub Actions 在独立 job 中
+安装锁定版本的 Chromium、运行 E2E typecheck/清单/Playwright 并始终上传
+`playwright-report`/`test-results`。所有未处理的 `/api/**` fixture 请求都会使测试失败。本轮清单为
+6 个场景；本机缺少 Playwright 1.53 对应 Chromium 时不能把本地执行标记为通过，历史 CI 的 3 个
+场景只代表当时提交。
 
 ## 8.8 阶段 6 H1–H3 的本机功能面
 
 - H1 的健康探针按能力分别报告配置、可达性和降级；首页与设置页的 FFmpeg 探针共同使用
   `VIDEO_FFMPEG_EXECUTABLE`，默认命令为 `ffmpeg`。远程 Provider 探针只把 2xx 视为成功，
-  认证失败、不可达和超时保持稳定的脱敏状态；FastEmbed 本地能力不会替代远程 Chat/ASR/
-  Vision/Reranker 的验证。
+  认证失败、不可达和超时保持稳定的脱敏状态；FastEmbed、faster-whisper 和
+  SentenceTransformers 只检查项目内缓存目录可用性并标记首次调用懒加载，不伪装成远程端点
+  验证，也不会在 health 中下载或运行模型。
 - H2 的人工合集由 SQLite `Collection`/`CollectionItem` 维护，成员仅来自已发布、current、
   非删除条目；合集名称列表同时写入受管理 Markdown 的 `collections` Frontmatter。发布、
   watcher 和 rescan 使用同一 Obsidian/Stage2 边界收敛关系；删除合集只删除关系和 Frontmatter，
@@ -362,6 +370,18 @@ job 中安装锁定版本的 Chromium、运行 E2E typecheck/Playwright 并始�
   状态，不返回 Vault 绝对路径、base URL 或凭据；配置仍通过项目根 `.env` 并在重启后生效。
   rescan、backup、rebuild 共用 maintenance/mutation lock，backup 由服务端生成归档 ID 并写入
   `data/backups/`；restore 仍只允许停止服务后使用显式目标的离线 CLI。
+
+## 8.9 当前产品页面收尾
+
+- 收件箱通过既有 `/api/sources/text`、`/files`、`/url` 和 `/video` 入口提供文本/Markdown、
+  浏览器文件队列、静态网页和视频 URL 采集；文件队列支持拖放、多选、即时校验、取消、逐项
+  失败保留和去重提示。审核详情只通过 review API 传递编辑后的标题、正文、摘要、标签/合集建议。
+- 知识库列表调用 `/api/items` 的状态、来源、标签、合集和日期筛选；详情显示当前 Markdown、
+  来源元数据、确认组织关系和同步状态。正文 PATCH 必须携带 `expected_content_hash`，重处理、
+  Obsidian 打开和软删除均复用现有 service/API，软删除不删除 Markdown。
+- Dashboard 只展示已发布 current 条目、待审核/待发布条目和处理任务的安全投影；Jobs 页面展示
+  状态、阶段、进度、生命周期、heartbeat、耗时、JobAttempt 和脱敏错误，并通过既有 retry/cancel
+  API 恢复任务。任务 payload、来源查询串、绝对路径、凭据、上游完整响应和 traceback 不进入前端。
 
 ## 9. Health
 
@@ -386,6 +406,6 @@ Chat、Embedding、ASR、Vision 和 Reranker 的 key 只来自后端 Settings。
 
 Dockerfile 构建 React 后由 FastAPI 托管静态产物，容器启动时执行 SQLite migration。Docker 是 delivery/CI concern，不是本地 prerequisite。`compose.yaml` 已移除。
 
-GitHub Actions 分别执行后端锁定同步、Ruff、pytest、同一临时 SQLite 的 upgrade/downgrade/upgrade，前端 npm ci/typecheck/test/build、Playwright E2E typecheck/Chromium 安装/执行与失败产物上传，以及 Docker build。提交 `ba7e247aac0213c85e223bff3238143af16a99f8` 的四个 H3 基线 jobs 均通过；H4 代码/测试提交 `5995efb0f39732b175994cdb7d450e8c2eccf144` 的 run `33281127978` 的四个 jobs 也均通过，Playwright job 实际执行了 3 个合成 E2E。本机没有 Docker 或匹配 Chromium，所以本地没有把 Docker build 或真实浏览器执行标记为通过。
+GitHub Actions 分别执行后端锁定同步、Ruff、连续两次 pytest、同一临时 SQLite 的 upgrade/downgrade/upgrade，前端 npm ci/typecheck/test/build、Playwright E2E typecheck/清单/Chromium 安装/执行与失败产物上传，以及 Docker build。历史 H3/H4 jobs 的结果仍作为既有证据保存；当前工作树的 6 个 Playwright 场景尚未由本机浏览器执行，本机没有 Docker 或匹配 Chromium 时不把对应门禁标记为通过。
 
 组件自动化使用 Vitest + Testing Library + jsdom。真实浏览器 E2E 将由 Playwright CI 或浏览器能力正常的环境执行；当前 runner 故障不阻塞阶段推进，也不记为通过。

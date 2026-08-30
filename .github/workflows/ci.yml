@@ -22,7 +22,10 @@ jobs:
       - run: uv sync --project backend --locked
       - run: uv lock --project backend --check
       - run: uv run --directory backend ruff check app tests
-      - run: uv run --directory backend pytest
+      - name: Run backend pytest twice
+        run: |
+          uv run --directory backend pytest
+          uv run --directory backend pytest
       - name: Verify SQLite migration upgrade downgrade upgrade
         env:
           DATABASE_URL: sqlite+aiosqlite:////tmp/zhiliutai-ci.db
@@ -61,6 +64,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run e2e:typecheck
+      - run: npm run e2e -- --list
       - run: npx playwright install --with-deps chromium
       - run: npm run e2e
       - name: Upload Playwright failure artifacts

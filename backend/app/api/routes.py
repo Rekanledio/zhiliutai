@@ -1,17 +1,26 @@
 import json
-from datetime import datetime
+from collections.abc import Mapping
+from datetime import date, datetime, time, timedelta, timezone
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
-from fastapi import APIRouter, Body, File, Form, Request, UploadFile
-from sqlalchemy import func, select
+from fastapi import APIRouter, Body, File, Form, Query, Request, UploadFile
+from sqlalchemy import and_, func, or_, select
 
 from app.core.errors import ApplicationError
+from app.core.paths import safe_relative_path
+from app.core.safety import redact_sensitive_text, redact_sensitive_value
 from app.db.models import (
     ContentVersion,
+    Collection,
+    CollectionItem,
+    JobAttempt,
     KnowledgeItem,
+    KnowledgeItemTag,
     NoteBinding,
     ProcessingJob,
     SourceArtifact,
+    Tag,
 )
 from app.obsidian.state import watcher_state
 from app.schemas.collections import (
@@ -19,8 +28,16 @@ from app.schemas.collections import (
     CollectionSummaryResponse,
     CollectionUpdateRequest,
     CollectionWriteRequest,
+    normalize_collection_names,
 )
-from app.schemas.health import DashboardResponse, DashboardStats, HealthResponse
+from app.schemas.health import (
+    DashboardJob,
+    DashboardPendingReview,
+    DashboardRecentItem,
+    DashboardResponse,
+    DashboardStats,
+    HealthResponse,
+)
 from app.schemas.settings import (
     MaintenanceRequest,
     SettingsBackupResponse,
@@ -31,6 +48,7 @@ from app.schemas.settings import (
 from app.schemas.stage2 import (
     ItemPatchRequest,
     ItemResponse,
+    JobAttemptResponse,
     JobResponse,
     ObsidianOpenResponse,
     ObsidianStatusResponse,
@@ -40,6 +58,7 @@ from app.schemas.stage2 import (
     TextSourceRequest,
     UrlSourceRequest,
 )
+from app.schemas.tags import normalize_tag_names
 from app.schemas.video import VideoSourceRequest
 from app.services.health import build_health_report
 from app.services.backup import BackupError
@@ -47,8 +66,121 @@ from app.services.maintenance import MaintenanceBusyError
 from app.services.settings import build_settings_response
 from app.services.stage2 import Stage2Service
 from app.workflows.contracts import IngestionResumeDecision
+from app.workflows.production import _safe_job_result as production_safe_job_result
 
 router = APIRouter(prefix="/api")
+
+_SAFE_SOURCE_METADATA_FIELDS = frozenset(
+    {
+        "kind",
+        "source_type",
+        "media_type",
+        "title",
+        "html_title",
+        "url",
+        "source_url",
+        "requested_url",
+        "final_url",
+        "page_count",
+        "paragraph_count",
+        "table_count",
+        "heading_count",
+        "heading_paragraphs",
+        "table_row_counts",
+        "duration_ms",
+        "video_id",
+        "uploader",
+        "width_px",
+        "height_px",
+        "frame_rate",
+        "is_live",
+        "video_kind",
+        "transcript_language",
+        "source_url_hash",
+        "provider",
+        "tool_version",
+    }
+)
+_SOURCE_URL_FIELDS = frozenset({"url", "source_url", "requested_url", "final_url"})
+_ITEM_STATUSES = frozenset({"processing", "pending_review", "reviewed", "published", "failed"})
+_ITEM_SOURCE_TYPES = frozenset({"text", "markdown", "pdf", "docx", "webpage", "video"})
+
+
+def _safe_public_source_url(value: object) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > 2048:
+        return None
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme.casefold() not in {"http", "https"} or not parsed.netloc:
+            return None
+        if parsed.username is not None or parsed.password is not None:
+            return None
+        _ = parsed.port
+    except ValueError:
+        return None
+    # Query and fragment values are intentionally omitted from public item
+    # metadata because source URLs may contain tracking or authentication
+    # material even when the intake validator accepted the URL.
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc, parsed.path, "", ""))
+
+
+def _safe_metadata_value(value: object, *, key: str | None = None) -> object:
+    if key in _SOURCE_URL_FIELDS:
+        return _safe_public_source_url(value)
+    if isinstance(value, Mapping):
+        return {
+            str(child_key): _safe_metadata_value(child_value, key=str(child_key))
+            for child_key, child_value in value.items()
+            if isinstance(child_key, str)
+        }
+    if isinstance(value, list):
+        return [_safe_metadata_value(child) for child in value]
+    return redact_sensitive_value(value)
+
+
+def _safe_source_metadata(value: Mapping[str, object]) -> dict[str, object]:
+    safe: dict[str, object] = {}
+    for key in _SAFE_SOURCE_METADATA_FIELDS:
+        if key not in value:
+            continue
+        sanitized = _safe_metadata_value(value[key], key=key)
+        if sanitized is not None:
+            safe[key] = sanitized
+
+    raw_segments = value.get("segments")
+    if isinstance(raw_segments, list):
+        segments: list[dict[str, object]] = []
+        for raw_segment in raw_segments:
+            if not isinstance(raw_segment, Mapping):
+                continue
+            locator = raw_segment.get("locator")
+            if not isinstance(locator, Mapping):
+                continue
+            segments.append(
+                {"locator": _safe_metadata_value(locator)}
+            )
+        safe["segments"] = segments
+    return safe
+
+
+def _item_filter_date(value: str | None, *, end_of_day: bool = False) -> datetime | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    try:
+        if len(normalized) == 10:
+            parsed_date = date.fromisoformat(normalized)
+            parsed = datetime.combine(parsed_date, time.min, tzinfo=timezone.utc)
+            if end_of_day:
+                parsed += timedelta(days=1)
+        else:
+            parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            parsed = parsed.astimezone(timezone.utc)
+    except ValueError as error:
+        raise ApplicationError(422, "invalid_item_filter", "知识库日期筛选条件无效") from error
+    return parsed
 
 
 def service(request: Request) -> Stage2Service:
@@ -244,53 +376,231 @@ async def remove_collection_item(
     )
 
 
-def job_out(job: ProcessingJob) -> JobResponse:
+def _safe_job_error(value: str | None) -> dict[str, object] | None:
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        parsed = {}
+    if not isinstance(parsed, Mapping):
+        parsed = {}
+    safe: dict[str, object] = {}
+    code = parsed.get("code")
+    if isinstance(code, str) and code.isascii() and code.replace("_", "").isalnum():
+        safe["code"] = code[:80]
+    error_type = parsed.get("type")
+    if isinstance(error_type, str):
+        safe_type = redact_sensitive_text(error_type).replace("\r", " ").replace("\n", " ").strip()
+        if safe_type and len(safe_type) <= 120:
+            safe["type"] = safe_type
+    message = parsed.get("message")
+    if isinstance(message, str):
+        safe_message = redact_sensitive_text(message).replace("\r", " ").replace("\n", " ").strip()
+        lowered = safe_message.casefold()
+        if (
+            not safe_message
+            or "traceback" in lowered
+            or "stack trace" in lowered
+            or "http://" in lowered
+            or "https://" in lowered
+            or "?" in safe_message
+        ):
+            safe_message = "处理失败"
+        safe["message"] = safe_message[:300]
+    if not safe:
+        return {"code": "job_failed", "message": "处理失败"}
+    safe.setdefault("message", "处理失败")
+    return safe
+
+
+def _safe_job_result(value: str | None) -> dict[str, object] | None:
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    safe = _safe_job_result_fields(parsed)
+    return safe or None
+
+
+def _safe_job_result_fields(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        return {}
+    # Keep the same narrow result allowlist used by the production workflow;
+    # job payloads, URLs, paths and provider responses never cross this API.
+    return production_safe_job_result(value)
+
+
+def _duration_ms(
+    started_at: datetime | None,
+    finished_at: datetime | None,
+    now: datetime,
+) -> int | None:
+    if started_at is None:
+        return None
+    start = started_at
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    end = finished_at or now
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    return max(0, int((end - start).total_seconds() * 1000))
+
+
+def _job_attempt_out(attempt: JobAttempt, now: datetime) -> JobAttemptResponse:
+    return JobAttemptResponse(
+        id=attempt.id,
+        attempt_no=attempt.attempt_no,
+        state=attempt.state,
+        stage=attempt.stage,
+        started_at=attempt.started_at,
+        heartbeat_at=attempt.heartbeat_at,
+        finished_at=attempt.finished_at,
+        duration_ms=_duration_ms(attempt.started_at, attempt.finished_at, now),
+        error=_safe_job_error(attempt.error_json),
+    )
+
+
+def job_out(
+    job: ProcessingJob,
+    attempts: list[JobAttempt] | None = None,
+    *,
+    now: datetime | None = None,
+) -> JobResponse:
+    observed_at = now or datetime.now(timezone.utc)
     return JobResponse(
         id=job.id,
         kind=job.kind,
         state=job.state,
         stage=job.stage,
-        progress=job.progress,
+        progress=max(0.0, min(1.0, float(job.progress))),
         retry_count=job.retry_count,
         max_retries=job.max_retries,
-        error=json.loads(job.error_json) if job.error_json else None,
-        result=json.loads(job.result_json) if job.result_json else None,
+        error=_safe_job_error(job.error_json),
+        result=_safe_job_result(job.result_json),
         heartbeat_at=job.heartbeat_at,
         created_at=job.created_at,
+        started_at=job.started_at,
+        finished_at=job.finished_at,
+        duration_ms=_duration_ms(job.started_at, job.finished_at, observed_at),
+        attempts=[
+            _job_attempt_out(attempt, observed_at)
+            for attempt in (attempts or [])
+        ],
     )
+
+
+async def _job_attempts(
+    session, job_ids: list[str]
+) -> dict[str, list[JobAttempt]]:
+    if not job_ids:
+        return {}
+    result = await session.execute(
+        select(JobAttempt)
+        .where(JobAttempt.processing_job_id.in_(job_ids))
+        .order_by(JobAttempt.processing_job_id, JobAttempt.attempt_no)
+    )
+    grouped: dict[str, list[JobAttempt]] = {}
+    for attempt in result.scalars():
+        grouped.setdefault(attempt.processing_job_id, []).append(attempt)
+    return grouped
+
+
+async def _job_response(request: Request, job_id: str) -> JobResponse:
+    async with request.app.state.session_factory() as session:
+        job = await session.get(ProcessingJob, job_id)
+        if job is None:
+            raise ApplicationError(404, "job_not_found", "任务不存在")
+        attempts = await _job_attempts(session, [job.id])
+        return job_out(job, attempts.get(job.id), now=datetime.now(timezone.utc))
+
+
+def _local_timestamp(value: datetime, local_timezone) -> datetime:
+    timestamp = value
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.astimezone(local_timezone)
 
 
 def item_out(
     item: KnowledgeItem,
     version: ContentVersion | None = None,
     binding: NoteBinding | None = None,
+    *,
+    confirmed_tags: list[str] | None = None,
+    collections: list[str] | None = None,
 ) -> ItemResponse:
     tags: list[str] = []
+    suggested_collections: list[str] = []
     source_metadata: dict[str, object] | None = None
     if version is not None:
-        parsed = json.loads(version.suggested_tags_json)
-        tags = [str(tag) for tag in parsed] if isinstance(parsed, list) else []
-        parsed_metadata = json.loads(version.source_metadata_json or "{}")
+        try:
+            parsed = json.loads(version.suggested_tags_json or "[]")
+        except json.JSONDecodeError:
+            parsed = []
+        if isinstance(parsed, list):
+            try:
+                tags = normalize_tag_names(parsed)
+            except ValueError:
+                tags = []
+        try:
+            parsed_collections = json.loads(version.suggested_collections_json or "[]")
+        except json.JSONDecodeError:
+            parsed_collections = []
+        if isinstance(parsed_collections, list):
+            try:
+                suggested_collections = normalize_collection_names(parsed_collections)
+            except ValueError:
+                suggested_collections = []
+        try:
+            parsed_metadata = json.loads(version.source_metadata_json or "{}")
+        except json.JSONDecodeError:
+            parsed_metadata = {}
         if isinstance(parsed_metadata, dict):
-            source_metadata = parsed_metadata
+            source_metadata = _safe_source_metadata(parsed_metadata)
+    safe_path = safe_relative_path(binding.relative_path) if binding else None
     return ItemResponse(
         id=item.id,
-        title=item.title,
+        title=version.title if version is not None else item.title,
         source_type=item.source_type,
         status=item.status,
         content_hash=version.content_hash if version else item.content_hash,
         current_content_version_id=item.current_content_version_id,
         pending_content_version_id=item.pending_content_version_id,
-        has_pending_review=item.pending_content_version_id is not None,
+        has_pending_review=(
+            item.pending_content_version_id is not None
+            or item.status == "pending_review"
+        ),
         body=version.body if version else None,
         summary=version.summary if version else None,
         suggested_tags=tags,
+        suggested_collections=suggested_collections,
+        confirmed_tags=confirmed_tags or [],
+        collections=collections or [],
         source_metadata=source_metadata,
         version_no=version.version_no if version else None,
-        note_relative_path=binding.relative_path if binding else None,
+        note_relative_path=safe_path,
         sync_state=binding.sync_state if binding else None,
         created_at=item.created_at,
         updated_at=item.updated_at,
+    )
+
+
+async def item_response(
+    request: Request,
+    item: KnowledgeItem,
+    version: ContentVersion | None = None,
+    binding: NoteBinding | None = None,
+) -> ItemResponse:
+    confirmed_tags, collections = await service(request).get_item_organization(item.id)
+    return item_out(
+        item,
+        version,
+        binding,
+        confirmed_tags=confirmed_tags,
+        collections=collections,
     )
 
 
@@ -314,20 +624,33 @@ async def dashboard(request: Request) -> DashboardResponse:
     weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     session_factory = request.app.state.session_factory
     async with session_factory() as session:
-        knowledge_count = int(
+        active_items = list(
             (
                 await session.execute(
-                    select(func.count(KnowledgeItem.id)).where(
-                        KnowledgeItem.deleted_at.is_(None)
-                    )
+                    select(KnowledgeItem).where(KnowledgeItem.deleted_at.is_(None))
                 )
-            ).scalar_one()
+            ).scalars()
+        )
+        knowledge_count = sum(
+            item.status == "published" and item.current_content_version_id is not None
+            for item in active_items
+        )
+        today_added = sum(
+            _local_timestamp(item.created_at, now.tzinfo).date() == now.date()
+            for item in active_items
+        )
+        pending_clause = or_(
+            KnowledgeItem.status.in_(["pending_review", "reviewed"]),
+            and_(
+                KnowledgeItem.status == "published",
+                KnowledgeItem.pending_content_version_id.is_not(None),
+            ),
         )
         pending_count = int(
             (
                 await session.execute(
                     select(func.count(KnowledgeItem.id)).where(
-                        KnowledgeItem.status == "pending_review",
+                        pending_clause,
                         KnowledgeItem.deleted_at.is_(None),
                     )
                 )
@@ -347,7 +670,7 @@ async def dashboard(request: Request) -> DashboardResponse:
                 await session.execute(
                     select(KnowledgeItem)
                     .where(
-                        KnowledgeItem.status == "pending_review",
+                        pending_clause,
                         KnowledgeItem.deleted_at.is_(None),
                     )
                     .order_by(KnowledgeItem.updated_at.desc())
@@ -359,7 +682,11 @@ async def dashboard(request: Request) -> DashboardResponse:
             (
                 await session.execute(
                     select(KnowledgeItem)
-                    .where(KnowledgeItem.deleted_at.is_(None))
+                    .where(
+                        KnowledgeItem.status == "published",
+                        KnowledgeItem.current_content_version_id.is_not(None),
+                        KnowledgeItem.deleted_at.is_(None),
+                    )
                     .order_by(KnowledgeItem.updated_at.desc())
                     .limit(5)
                 )
@@ -380,21 +707,44 @@ async def dashboard(request: Request) -> DashboardResponse:
         date_label=f"{now.month} 月 {now.day} 日 · {weekdays[now.weekday()]}",
         stats=DashboardStats(
             knowledge_count=knowledge_count,
-            today_added=0,
+            today_added=today_added,
             pending_review=pending_count,
             processing=processing_count,
         ),
         health=await build_health_report(request.app.state.settings),
         pending_reviews=[
-            {"id": item.id, "title": item.title, "source_type": item.source_type}
+            DashboardPendingReview(
+                id=item.id,
+                title=redact_sensitive_text(item.title),
+                source_type=item.source_type,
+                status=item.status,
+                updated_at=item.updated_at,
+            )
             for item in pending_items
         ],
         recent_items=[
-            {"id": item.id, "title": item.title, "status": item.status}
+            DashboardRecentItem(
+                id=item.id,
+                title=redact_sensitive_text(item.title),
+                source_type=item.source_type,
+                status=item.status,
+                updated_at=item.updated_at,
+            )
             for item in recent_items
         ],
         processing_jobs=[
-            {"id": job.id, "kind": job.kind, "state": job.state, "stage": job.stage}
+            DashboardJob(
+                id=job.id,
+                kind=job.kind,
+                state=job.state,
+                stage=job.stage,
+                progress=max(0.0, min(1.0, float(job.progress))),
+                heartbeat_at=job.heartbeat_at,
+                started_at=job.started_at,
+                finished_at=job.finished_at,
+                duration_ms=_duration_ms(job.started_at, job.finished_at, now),
+                error=_safe_job_error(job.error_json),
+            )
             for job in jobs
         ],
     )
@@ -482,22 +832,23 @@ async def list_jobs(request: Request) -> list[JobResponse]:
                 )
             ).scalars()
         )
-    return [job_out(job) for job in jobs]
+        attempts = await _job_attempts(session, [job.id for job in jobs])
+        observed_at = datetime.now(timezone.utc)
+        return [
+            job_out(job, attempts.get(job.id), now=observed_at)
+            for job in jobs
+        ]
 
 
 @router.get("/jobs/{job_id}", response_model=JobResponse, tags=["jobs"])
 async def get_job(job_id: str, request: Request) -> JobResponse:
-    async with request.app.state.session_factory() as session:
-        job = await session.get(ProcessingJob, job_id)
-    if job is None:
-        raise ApplicationError(404, "job_not_found", "任务不存在")
-    return job_out(job)
+    return await _job_response(request, job_id)
 
 
 @router.post("/jobs/{job_id}/retry", response_model=JobResponse, tags=["jobs"])
 async def retry_job(job_id: str, request: Request) -> JobResponse:
-    job = await request.app.state.job_runner.retry(job_id)
-    return job_out(job)
+    await request.app.state.job_runner.retry(job_id)
+    return await _job_response(request, job_id)
 
 
 @router.post("/jobs/{job_id}/cancel", response_model=JobResponse, tags=["jobs"])
@@ -505,27 +856,83 @@ async def cancel_job(job_id: str, request: Request) -> JobResponse:
     job = await request.app.state.ingestion_workflow.cancel_job(job_id)
     if job is None:
         job = await request.app.state.job_runner.cancel(job_id)
-    return job_out(job)
+    return await _job_response(request, job.id)
 
 
 @router.get("/items", response_model=list[ItemResponse], tags=["items"])
-async def list_items(request: Request, status: str | None = None) -> list[ItemResponse]:
+async def list_items(
+    request: Request,
+    status: str | None = Query(default=None, max_length=32),
+    source_type: str | None = Query(default=None, max_length=32),
+    tag: str | None = Query(default=None, max_length=80),
+    collection: str | None = Query(default=None, max_length=200),
+    created_after: str | None = Query(default=None, max_length=64),
+    created_before: str | None = Query(default=None, max_length=64),
+) -> list[ItemResponse]:
+    if status is not None and status not in _ITEM_STATUSES:
+        raise ApplicationError(422, "invalid_item_filter", "知识库状态筛选条件无效")
+    if source_type is not None and source_type not in _ITEM_SOURCE_TYPES:
+        raise ApplicationError(422, "invalid_item_filter", "知识库来源筛选条件无效")
+    try:
+        tag_name = normalize_tag_names([tag])[0] if tag is not None else None
+        collection_name = (
+            normalize_collection_names([collection])[0]
+            if collection is not None
+            else None
+        )
+    except ValueError as error:
+        raise ApplicationError(422, "invalid_item_filter", "知识库标签或合集筛选条件无效") from error
+    after = _item_filter_date(created_after)
+    before = _item_filter_date(created_before, end_of_day=True)
+    if after is not None and before is not None and after >= before:
+        raise ApplicationError(422, "invalid_item_filter", "知识库日期范围无效")
+
     async with request.app.state.session_factory() as session:
         statement = select(KnowledgeItem).where(KnowledgeItem.deleted_at.is_(None))
         if status:
             statement = statement.where(KnowledgeItem.status == status)
+            if status == "published":
+                statement = statement.where(
+                    KnowledgeItem.current_content_version_id.is_not(None)
+                )
+        if source_type:
+            statement = statement.where(KnowledgeItem.source_type == source_type)
+        if tag_name is not None:
+            statement = statement.where(
+                KnowledgeItem.id.in_(
+                    select(KnowledgeItemTag.knowledge_item_id)
+                    .join(Tag, Tag.id == KnowledgeItemTag.tag_id)
+                    .where(Tag.normalized_name == tag_name.casefold())
+                )
+            )
+        if collection_name is not None:
+            statement = statement.where(
+                KnowledgeItem.id.in_(
+                    select(CollectionItem.knowledge_item_id)
+                    .join(Collection, Collection.id == CollectionItem.collection_id)
+                    .where(func.lower(Collection.name) == collection_name.casefold())
+                )
+            )
+        if after is not None:
+            statement = statement.where(KnowledgeItem.created_at >= after)
+        if before is not None:
+            statement = statement.where(KnowledgeItem.created_at < before)
         items = list(
             (
                 await session.execute(statement.order_by(KnowledgeItem.updated_at.desc()))
             ).scalars()
         )
-    return [item_out(item) for item in items]
+    responses: list[ItemResponse] = []
+    for item in items:
+        current_item, version, binding = await service(request).get_item(item.id)
+        responses.append(await item_response(request, current_item, version, binding))
+    return responses
 
 
 @router.get("/items/{item_id}", response_model=ItemResponse, tags=["items"])
 async def get_item(item_id: str, request: Request) -> ItemResponse:
     item, version, binding = await service(request).get_item(item_id)
-    return item_out(item, version, binding)
+    return await item_response(request, item, version, binding)
 
 
 @router.patch("/items/{item_id}", response_model=ItemResponse, tags=["items"])
@@ -536,13 +943,31 @@ async def patch_item(
         item_id, payload.title, payload.body, payload.expected_content_hash
     )
     item, version, binding = await service(request).get_item(item.id)
-    return item_out(item, version, binding)
+    return await item_response(request, item, version, binding)
 
 
 @router.post("/items/{item_id}/review", response_model=ItemResponse, tags=["items"])
 async def review_item(
     item_id: str, payload: ReviewRequest, request: Request
 ) -> ItemResponse:
+    if payload.resolved_decision() == "approve" and any(
+        value is not None
+        for value in (
+            payload.title,
+            payload.body,
+            payload.summary,
+            payload.suggested_tags,
+            payload.suggested_collections,
+        )
+    ):
+        await service(request).update_pending_review(
+            item_id,
+            title=payload.title,
+            body=payload.body,
+            summary=payload.summary,
+            suggested_tags=payload.suggested_tags,
+            suggested_collections=payload.suggested_collections,
+        )
     decision = IngestionResumeDecision(decision=payload.resolved_decision())
     run = await request.app.state.ingestion_workflow.resume_item(
         item_id,
@@ -552,7 +977,7 @@ async def review_item(
     if run.get("stage") == "failed":
         raise ApplicationError(500, "internal_error", "服务内部错误")
     item, version, binding = await service(request).get_item(item_id)
-    return item_out(item, version, binding)
+    return await item_response(request, item, version, binding)
 
 
 @router.post("/items/{item_id}/publish", response_model=ItemResponse, tags=["items"])
@@ -572,7 +997,7 @@ async def publish_item(
     if run.get("stage") == "failed":
         raise ApplicationError(500, "internal_error", "服务内部错误")
     item, version, binding = await service(request).get_item(item_id)
-    return item_out(item, version, binding)
+    return await item_response(request, item, version, binding)
 
 
 @router.post(

@@ -39,7 +39,13 @@ def test_migration_upgrade_downgrade_upgrade(tmp_path: Path, monkeypatch) -> Non
             "job_attempts",
             "chunks",
             "chunk_fts",
+            "tags",
+            "knowledge_item_tags",
         }.issubset(tables)
+        assert "suggested_collections_json" in {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(content_versions)")
+        }
         assert connection.execute("SELECT sql FROM sqlite_master WHERE name='chunk_fts'").fetchone()
     command.downgrade(config, "base")
     command.upgrade(config, "head")

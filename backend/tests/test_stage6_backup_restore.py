@@ -58,7 +58,7 @@ def _make_minimal_backup(settings: Settings, monkeypatch, destination: Path) -> 
     try:
         service = BackupRestoreService(settings, async_sessionmaker(engine, expire_on_commit=False))
         result = service.create_backup(destination)
-        assert result.manifest.schema_revision == "0006_collections"
+        assert result.manifest.schema_revision == "0007_tags_and_review_suggestions"
     finally:
         _dispose(engine)
     return destination
@@ -285,7 +285,7 @@ def test_restore_explicit_overwrite_rolls_back_interruption(
         with sqlite3.connect(targets.database_path) as connection:
             assert connection.execute(
                 "SELECT version_num FROM alembic_version"
-            ).fetchone() == ("0006_collections",)
+            ).fetchone() == ("0007_tags_and_review_suggestions",)
     finally:
         _dispose(engine)
 
@@ -344,7 +344,7 @@ def test_restore_requires_offline_and_replaces_all_sqlite_sidecars(
         with sqlite3.connect(targets.database_path) as connection:
             assert connection.execute(
                 "SELECT version_num FROM alembic_version"
-            ).fetchone() == ("0006_collections",)
+            ).fetchone() == ("0007_tags_and_review_suggestions",)
         with sqlite3.connect(targets.checkpoint_path) as connection:
             assert connection.execute(
                 "SELECT value FROM checkpoint_marker"

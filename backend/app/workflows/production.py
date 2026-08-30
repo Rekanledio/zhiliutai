@@ -430,8 +430,21 @@ class IngestionWorkflowCoordinator:
             return run
 
         latest = jobs[0] if jobs else None
-        if gate == "publish" and latest is not None and latest.stage == "complete":
-            return await self.runtime.snapshot_ingestion(latest.id)
+        if latest is not None:
+            latest_run = await self.runtime.snapshot_ingestion(latest.id)
+            completed_stage = latest_run.get("stage")
+            if gate == "review" and (
+                (completed_stage == "publish_gate" and decision.decision == "approve")
+                or (completed_stage == "rejected" and decision.decision == "reject")
+                or (completed_stage == "cancelled" and decision.decision == "cancel")
+            ):
+                return latest_run
+            if gate == "publish" and (
+                (completed_stage == "completed" and decision.decision == "approve")
+                or (completed_stage == "rejected" and decision.decision == "reject")
+                or (completed_stage == "cancelled" and decision.decision == "cancel")
+            ):
+                return latest_run
 
         failed = next((candidate for candidate in jobs if candidate.state == "failed"), None)
         if failed is not None:

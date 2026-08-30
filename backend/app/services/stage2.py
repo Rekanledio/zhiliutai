@@ -22,7 +22,9 @@ from app.db.models import (
     KnowledgeItem,
     NoteBinding,
     ProcessingJob,
+    KnowledgeItemTag,
     SourceArtifact,
+    Tag,
 )
 from app.ingestion.fetcher import SourceFetcher, UnsafeUrlError
 from app.ingestion.parsers import parse_source
@@ -46,9 +48,48 @@ from app.services.indexing import IndexService
 from app.services.video import VideoService
 from app.services.vector_store import QdrantLocalStore
 from app.schemas.collections import normalize_collection_names
+from app.schemas.tags import normalize_tag_names, normalize_tag_text
 
 
 logger = structlog.get_logger("stage2")
+
+
+def _safe_tag_names(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    accepted: list[str] = []
+    for candidate in value[:50]:
+        try:
+            accepted.append(normalize_tag_text(candidate))
+        except ValueError:
+            continue
+    try:
+        return normalize_tag_names(accepted)
+    except ValueError:
+        return []
+
+
+def _safe_collection_names(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    accepted: list[str] = []
+    for candidate in value[:50]:
+        try:
+            accepted.extend(normalize_collection_names([candidate]))
+        except ValueError:
+            continue
+    try:
+        return normalize_collection_names(accepted)
+    except ValueError:
+        return []
+
+
+def _json_name_list(raw: str | None, *, kind: Literal["tag", "collection"]) -> list[str]:
+    try:
+        value = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        return []
+    return _safe_tag_names(value) if kind == "tag" else _safe_collection_names(value)
 
 
 class Stage2Service:
@@ -480,7 +521,13 @@ class Stage2Service:
                     body=normalize_content(draft.body),
                     content_hash=content_hash(draft.body),
                     summary=draft.summary,
-                    suggested_tags_json=json.dumps(draft.suggested_tags, ensure_ascii=False),
+                    suggested_tags_json=json.dumps(
+                        _safe_tag_names(draft.suggested_tags), ensure_ascii=False
+                    ),
+                    suggested_collections_json=json.dumps(
+                        _safe_collection_names(draft.suggested_collections),
+                        ensure_ascii=False,
+                    ),
                     prompt_version=draft.prompt_version,
                     source_metadata_json=json.dumps(
                         {
@@ -497,10 +544,21 @@ class Stage2Service:
                 )
                 session.add(version)
                 await session.flush()
-                if not title_provided:
-                    item.title = version.title
-                item.status = "pending_review"
-                item.current_content_version_id = version.id
+                published_current = (
+                    item.status == "published"
+                    and item.current_content_version_id is not None
+                )
+                if published_current:
+                    # A reprocess result is another review candidate.  The
+                    # published/current version remains authoritative until
+                    # the candidate passes both HITL gates.
+                    item.pending_content_version_id = version.id
+                else:
+                    if not title_provided:
+                        item.title = version.title
+                    item.status = "pending_review"
+                    item.current_content_version_id = version.id
+                    item.pending_content_version_id = None
                 item.updated_at = datetime.now(timezone.utc)
                 result: dict[str, object] = {
                     "item_id": item.id,
@@ -519,11 +577,61 @@ class Stage2Service:
         )
         return int(result.scalar_one() or 0) + 1
 
+    async def update_pending_review(
+        self,
+        item_id: str,
+        *,
+        title: str | None = None,
+        body: str | None = None,
+        summary: str | None = None,
+        suggested_tags: list[str] | None = None,
+        suggested_collections: list[str] | None = None,
+    ) -> KnowledgeItem:
+        """Apply reviewer edits to the candidate version before graph resume.
+
+        The candidate row keeps its identifier, so the persisted graph
+        checkpoint still points at the exact version that will be published.
+        No organization relation is made official until the publish service
+        commits the reviewed Markdown version.
+        """
+
+        async with self.mutation_lock:
+            async with self.session_factory() as session, session.begin():
+                item = await self._item(session, item_id)
+                if item.status not in {"pending_review", "published"}:
+                    raise ApplicationError(409, "invalid_item_state", "条目不在待审核状态")
+                if item.status == "published" and item.pending_content_version_id is None:
+                    raise ApplicationError(409, "invalid_item_state", "条目不在待审核状态")
+                version = await self._version(session, item)
+                if title is not None:
+                    version.title = title[:300]
+                if body is not None:
+                    version.body = normalize_content(body)
+                    version.content_hash = content_hash(version.body)
+                if summary is not None:
+                    version.summary = summary.strip() or None
+                if suggested_tags is not None:
+                    version.suggested_tags_json = json.dumps(
+                        _safe_tag_names(suggested_tags), ensure_ascii=False
+                    )
+                if suggested_collections is not None:
+                    version.suggested_collections_json = json.dumps(
+                        _safe_collection_names(suggested_collections),
+                        ensure_ascii=False,
+                    )
+                if item.status != "published" and item.current_content_version_id == version.id:
+                    item.title = version.title
+                item.updated_at = datetime.now(timezone.utc)
+                await session.flush()
+                return item
+
     async def review(self, item_id: str) -> KnowledgeItem:
         async with self.session_factory() as session, session.begin():
             item = await self._item(session, item_id)
             if item.status == "published" and item.pending_content_version_id is None:
                 raise ApplicationError(409, "invalid_item_state", "条目不在待审核状态")
+            if item.status == "reviewed":
+                return item
             if item.status not in {"pending_review", "published"}:
                 raise ApplicationError(409, "invalid_item_state", "条目不在待审核状态")
             if item.status != "published":
@@ -598,6 +706,7 @@ class Stage2Service:
                 content_hash=content_hash(next_body),
                 summary=current.summary,
                 suggested_tags_json=current.suggested_tags_json,
+                suggested_collections_json=current.suggested_collections_json,
                 prompt_version=current.prompt_version,
                 source_metadata_json=current.source_metadata_json,
             )
@@ -643,7 +752,15 @@ class Stage2Service:
             )
         next_title = (title or item.title)[:300]
         next_body = normalize_content(body if body is not None else disk_note.body)
-        collections = await self._collection_names(session, item.id)
+        existing_collections = await self._collection_names(session, item.id)
+        collections, tags = self._frontmatter_relation_names(disk_note.metadata)
+        # Older managed notes may not have a collections key.  Keep their
+        # confirmed relation in that case; an explicit empty list means the
+        # user intentionally removed every collection.
+        if "collections" not in disk_note.metadata:
+            collections = existing_collections
+        collection_ids = await self._collection_ids_for_names(session, collections)
+        tag_ids = await self._tag_ids_for_names(session, tags)
         raw = render_note(
             zhiliu_id=binding.zhiliu_id,
             source_type=item.source_type,
@@ -652,7 +769,7 @@ class Stage2Service:
             status="reviewed",
             created_at=item.created_at,
             updated_at=datetime.now(timezone.utc),
-            tags=[str(tag) for tag in disk_note.metadata.get("tags", []) if isinstance(tag, str)],
+            tags=tags,
             collections=collections,
             source_url=self._source_url(current.source_metadata_json),
         )
@@ -672,6 +789,8 @@ class Stage2Service:
             binding.relative_path,
             source_metadata_json=source_metadata_json,
         )
+        await self._replace_collection_relations(session, item.id, collection_ids)
+        await self._replace_tag_relations(session, item.id, tag_ids)
         return item
 
     async def publish(self, item_id: str) -> KnowledgeItem:
@@ -713,7 +832,16 @@ class Stage2Service:
                 if item.status not in {"reviewed", "published"}:
                     raise ApplicationError(409, "invalid_item_state", "条目必须先审核再发布")
                 current = await self._version(session, item)
-                collections = await self._collection_names(session, item.id)
+                existing_collections = await self._collection_names(session, item.id)
+                suggested_collections = _json_name_list(
+                    current.suggested_collections_json, kind="collection"
+                )
+                collections = suggested_collections or existing_collections
+                existing_tags = await self._tag_names(session, item.id)
+                suggested_tags = _json_name_list(current.suggested_tags_json, kind="tag")
+                tags = suggested_tags or existing_tags
+                collection_ids = await self._collection_ids_for_names(session, collections)
+                tag_ids = await self._tag_ids_for_names(session, tags)
                 binding_result = await session.execute(
                     select(NoteBinding).where(NoteBinding.knowledge_item_id == item.id)
                 )
@@ -731,7 +859,7 @@ class Stage2Service:
                     status="reviewed",
                     created_at=item.created_at,
                     updated_at=datetime.now(timezone.utc),
-                    tags=json.loads(current.suggested_tags_json),
+                    tags=tags,
                     collections=collections,
                     source_url=self._source_url(current.source_metadata_json),
                 )
@@ -756,6 +884,7 @@ class Stage2Service:
                     source_metadata_json=current.source_metadata_json,
                     summary=current.summary,
                     suggested_tags_json=current.suggested_tags_json,
+                    suggested_collections_json=current.suggested_collections_json,
                     prompt_version=current.prompt_version,
                 )
                 candidate_version_id = version.id
@@ -787,6 +916,8 @@ class Stage2Service:
                     session.add(binding)
                     await session.flush()
                 self._activate_vault_version(item, binding, version, relative_path, digest)
+                await self._replace_collection_relations(session, item.id, collection_ids)
+                await self._replace_tag_relations(session, item.id, tag_ids)
                 item.pending_content_version_id = None
             return item
         except BaseException:
@@ -837,6 +968,96 @@ class Stage2Service:
                 "collection_invalid_state",
                 "合集关系包含不允许的内容",
             ) from error
+
+    @staticmethod
+    async def _tag_names(session: AsyncSession, item_id: str) -> list[str]:
+        result = await session.execute(
+            select(Tag.name)
+            .join(KnowledgeItemTag, KnowledgeItemTag.tag_id == Tag.id)
+            .where(KnowledgeItemTag.knowledge_item_id == item_id)
+            .order_by(Tag.normalized_name, Tag.name)
+        )
+        try:
+            return normalize_tag_names(
+                [name for name in result.scalars() if isinstance(name, str)]
+            )
+        except ValueError as error:
+            raise ApplicationError(
+                409,
+                "tag_invalid_state",
+                "标签关系包含不允许的内容",
+            ) from error
+
+    async def get_item_organization(self, item_id: str) -> tuple[list[str], list[str]]:
+        """Return confirmed tags and collections for a safe item projection."""
+
+        async with self.session_factory() as session:
+            item = await self._item(session, item_id)
+            return (
+                await self._tag_names(session, item.id),
+                await self._collection_names(session, item.id),
+            )
+
+    @staticmethod
+    async def _tag_ids_for_names(
+        session: AsyncSession, tag_names: Sequence[str]
+    ) -> set[str]:
+        normalized_names = normalize_tag_names(list(tag_names))
+        folded_names = {name.casefold() for name in normalized_names}
+        if not folded_names:
+            return set()
+        result = await session.execute(
+            select(Tag.id, Tag.normalized_name).where(
+                Tag.normalized_name.in_(folded_names)
+            )
+        )
+        matches: dict[str, str] = {}
+        for tag_id, normalized_name in result.all():
+            if not isinstance(normalized_name, str):
+                continue
+            folded = normalized_name.casefold()
+            if folded in matches and matches[folded] != tag_id:
+                raise ValueError("Markdown 标签同步冲突")
+            matches[folded] = tag_id
+        for name in normalized_names:
+            folded = name.casefold()
+            if folded in matches:
+                continue
+            tag = Tag(name=name, normalized_name=folded)
+            try:
+                async with session.begin_nested():
+                    session.add(tag)
+                    await session.flush()
+            except IntegrityError:
+                existing = await session.execute(
+                    select(Tag.id, Tag.normalized_name).where(
+                        Tag.normalized_name == folded
+                    )
+                )
+                row = existing.first()
+                if row is None or not isinstance(row.normalized_name, str):
+                    raise ValueError("Markdown 标签同步冲突")
+                matches[row.normalized_name.casefold()] = row.id
+            else:
+                matches[folded] = tag.id
+        return set(matches.values())
+
+    @staticmethod
+    async def _replace_tag_relations(
+        session: AsyncSession, item_id: str, desired_ids: set[str]
+    ) -> None:
+        result = await session.execute(
+            select(KnowledgeItemTag).where(
+                KnowledgeItemTag.knowledge_item_id == item_id
+            )
+        )
+        existing = list(result.scalars())
+        existing_ids = {relation.tag_id for relation in existing}
+        for relation in existing:
+            if relation.tag_id not in desired_ids:
+                await session.delete(relation)
+        for tag_id in desired_ids - existing_ids:
+            session.add(KnowledgeItemTag(tag_id=tag_id, knowledge_item_id=item_id))
 
     async def stage_collection_note(
         self,
@@ -1003,21 +1224,30 @@ class Stage2Service:
 
     @staticmethod
     def _frontmatter_tags(metadata: dict[str, object]) -> list[str]:
-        values = metadata.get("tags", [])
-        if not isinstance(values, list) or len(values) > 50:
-            raise ValueError("Frontmatter 标签无效")
-        tags: list[str] = []
-        for value in values:
-            if (
-                not isinstance(value, str)
-                or not value
-                or len(value) > 80
-                or any(ord(character) < 32 or ord(character) == 127 for character in value)
-                or redact_sensitive_text(value) != value
-            ):
-                raise ValueError("Frontmatter 标签无效")
-            tags.append(value)
-        return tags
+        try:
+            return normalize_tag_names(metadata.get("tags", []))
+        except ValueError as error:
+            raise ValueError("Frontmatter 标签无效") from error
+
+    @staticmethod
+    def _frontmatter_collections(metadata: dict[str, object]) -> list[str]:
+        try:
+            return normalize_collection_names(metadata.get("collections", []))
+        except ValueError as error:
+            raise ValueError("Frontmatter 合集无效") from error
+
+    @classmethod
+    def _frontmatter_relation_names(
+        cls, metadata: dict[str, object]
+    ) -> tuple[list[str], list[str]]:
+        """Validate the two independent, user-editable Frontmatter lists."""
+
+        try:
+            collection_names = cls._frontmatter_collections(metadata)
+            tag_names = cls._frontmatter_tags(metadata)
+        except ValueError as error:
+            raise ValueError("Frontmatter 关系无效") from error
+        return collection_names, tag_names
 
     @staticmethod
     def _frontmatter_source_url(
@@ -1070,6 +1300,11 @@ class Stage2Service:
     ) -> ContentVersion:
         if self.embedding_provider is None:
             raise ApplicationError(409, "embedding_not_configured", "Embedding capability 未配置")
+        source_version = (
+            await session.get(ContentVersion, item.current_content_version_id)
+            if item.current_content_version_id
+            else None
+        )
         version = await self._new_vault_version(
             session,
             item,
@@ -1077,6 +1312,18 @@ class Stage2Service:
             body,
             relative_path,
             source_metadata_json=source_metadata_json,
+            summary=source_version.summary if source_version is not None else None,
+            suggested_tags_json=(
+                source_version.suggested_tags_json
+                if source_version is not None
+                else "[]"
+            ),
+            suggested_collections_json=(
+                source_version.suggested_collections_json
+                if source_version is not None
+                else "[]"
+            ),
+            prompt_version=source_version.prompt_version if source_version is not None else None,
         )
         index = IndexService(self.vector_store, self.embedding_provider)
         await index.index_version(session, item, version, relative_path)
@@ -1095,6 +1342,7 @@ class Stage2Service:
         source_metadata_json: str | None = None,
         summary: str | None = None,
         suggested_tags_json: str = "[]",
+        suggested_collections_json: str = "[]",
         prompt_version: str | None = None,
     ) -> ContentVersion:
         version = ContentVersion(
@@ -1106,6 +1354,7 @@ class Stage2Service:
             content_hash=content_hash(body),
             summary=summary,
             suggested_tags_json=suggested_tags_json,
+            suggested_collections_json=suggested_collections_json,
             prompt_version=prompt_version,
             source_metadata_json=source_metadata_json
             or self._vault_source_metadata(item, body, relative_path),
@@ -1195,8 +1444,8 @@ class Stage2Service:
                 if item is None:
                     continue
                 try:
-                    collection_names = normalize_collection_names(
-                        note.metadata.get("collections", [])
+                    collection_names, tag_names = self._frontmatter_relation_names(
+                        note.metadata
                     )
                     if (
                         item.deleted_at is None
@@ -1208,18 +1457,24 @@ class Stage2Service:
                         )
                         if current is None or current.knowledge_item_id != item.id:
                             raise ValueError("Markdown 合集引用无效")
+                        if "collections" not in note.metadata:
+                            collection_names = await self._collection_names(
+                                session, item.id
+                            )
                         collection_ids = await self._collection_ids_for_names(
                             session, collection_names
                         )
-                    elif collection_names:
-                        raise ValueError("Markdown 合集引用无效")
+                        tag_ids = await self._tag_ids_for_names(session, tag_names)
+                    elif collection_names or tag_names:
+                        raise ValueError("Markdown Frontmatter 关系无效")
                     else:
                         collection_ids = set()
+                        tag_ids = set()
                 except ValueError:
                     invalid += 1
                     if binding:
                         binding.sync_state = "error"
-                        binding.last_error = "Markdown 合集 Frontmatter 无效"
+                        binding.last_error = "Markdown Frontmatter 关系无效"
                     continue
                 if binding is None:
                     binding = NoteBinding(
@@ -1261,6 +1516,7 @@ class Stage2Service:
                     await self._replace_collection_relations(
                         session, item.id, collection_ids
                     )
+                    await self._replace_tag_relations(session, item.id, tag_ids)
             for binding in bindings:
                 if binding.zhiliu_id not in found:
                     if binding.relative_path in present_relative_paths:
@@ -1322,9 +1578,18 @@ class Stage2Service:
                     # later rescan observes a stable, valid Markdown document.
                     pass
                 else:
-                    if version is not None:
-                        version.body = note.body
-                        version.content_hash = content_hash(note.body)
+                    try:
+                        self._frontmatter_relation_names(note.metadata)
+                    except ValueError:
+                        # An invalid user-edited Frontmatter must not make an
+                        # unvalidated disk body appear as the published
+                        # current version.  Rescan records the binding error;
+                        # reads continue to use the last indexed version.
+                        pass
+                    else:
+                        if version is not None:
+                            version.body = note.body
+                            version.content_hash = content_hash(note.body)
             return item, version, binding
 
     async def soft_delete(self, item_id: str) -> None:

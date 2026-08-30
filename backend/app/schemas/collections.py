@@ -148,6 +148,7 @@ class CollectionItemResponse(BaseModel):
     source_type: StrictStr
     version_no: StrictInt = Field(ge=1)
     suggested_tags: list[StrictStr] = Field(default_factory=list, max_length=50)
+    confirmed_tags: list[StrictStr] = Field(default_factory=list, max_length=50)
 
 
 class CollectionSummaryResponse(BaseModel):

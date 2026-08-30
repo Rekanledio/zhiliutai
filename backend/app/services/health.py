@@ -264,7 +264,7 @@ async def _probe_http_model(
 async def probe_model_providers(settings: Settings) -> HealthComponent:
     local_configured = False
     local_failures: list[str] = []
-    local_detail = "本地能力：未使用 FastEmbed"
+    local_summaries: list[str] = []
     if settings.embedding_provider == "fastembed" and settings.embedding_model:
         cache = probe_writable_directory(
             "embedding_cache",
@@ -275,18 +275,65 @@ async def probe_model_providers(settings: Settings) -> HealthComponent:
         local_configured = True
         if cache.state != "healthy":
             local_failures.append("Embedding")
-            local_detail = "本地能力：Embedding=FastEmbed 缓存不可用"
+            local_summaries.append("Embedding=FastEmbed 缓存不可用")
         else:
-            local_detail = "本地能力：Embedding=FastEmbed（首次调用时加载）"
+            local_summaries.append("Embedding=FastEmbed（首次调用时加载）")
     elif settings.embedding_provider == "fastembed":
-        local_detail = "本地能力：Embedding=未配置"
+        local_summaries.append("Embedding=未配置")
+
+    if settings.asr_provider == "faster-whisper" and settings.asr_model:
+        cache = probe_writable_directory(
+            "asr_cache",
+            "ASR Cache",
+            settings.asr_cache_path,
+            create=True,
+        )
+        local_configured = True
+        if cache.state != "healthy":
+            local_failures.append("ASR")
+            local_summaries.append("ASR=faster-whisper 缓存不可用")
+        else:
+            local_summaries.append("ASR=faster-whisper（首次调用时加载）")
+    elif settings.asr_provider == "faster-whisper":
+        local_summaries.append("ASR=未配置")
+
+    if settings.reranker_provider == "sentence-transformers" and settings.reranker_model:
+        cache = probe_writable_directory(
+            "reranker_cache",
+            "Reranker Cache",
+            settings.reranker_cache_path,
+            create=True,
+        )
+        local_configured = True
+        if cache.state != "healthy":
+            local_failures.append("Reranker")
+            local_summaries.append("Reranker=SentenceTransformers 缓存不可用")
+        else:
+            local_summaries.append("Reranker=SentenceTransformers（首次调用时加载）")
+    elif settings.reranker_provider == "sentence-transformers":
+        local_summaries.append("Reranker=未配置")
+
+    local_detail = "本地能力：" + ("、".join(local_summaries) or "未配置")
 
     capabilities = [
         ("Chat", settings.chat_base_url, settings.chat_model, settings.chat_api_key),
-        ("ASR", settings.asr_base_url, settings.asr_model, settings.asr_api_key),
-        ("Vision", settings.vision_base_url, settings.vision_model, settings.vision_api_key),
-        ("Reranker", settings.reranker_base_url, settings.reranker_model, settings.reranker_api_key),
     ]
+    if settings.asr_provider == "openai-compatible":
+        capabilities.append(
+            ("ASR", settings.asr_base_url, settings.asr_model, settings.asr_api_key)
+        )
+    capabilities.append(
+        ("Vision", settings.vision_base_url, settings.vision_model, settings.vision_api_key)
+    )
+    if settings.reranker_provider == "openai-compatible":
+        capabilities.append(
+            (
+                "Reranker",
+                settings.reranker_base_url,
+                settings.reranker_model,
+                settings.reranker_api_key,
+            )
+        )
     if settings.embedding_provider == "openai-compatible":
         capabilities.insert(
             1,

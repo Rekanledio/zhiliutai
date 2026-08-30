@@ -1,9 +1,6 @@
 # 测试与验证策略
 
-阶段 6 最终结论为 **PASS WITH NON-BLOCKING RISKS**（Sol 已完成最终复验）。提交
-`ba7e247aac0213c85e223bff3238143af16a99f8` 的四个 H3 基线 CI jobs 均通过；H4 代码/测试提交
-`5995efb0f39732b175994cdb7d450e8c2eccf144` 的 run `33281127978` 四个 jobs 均通过，Playwright
-job 实际执行了 3 个合成 E2E。本机缺少匹配版本浏览器，只登记为本机环境限制，不把本地真实浏览器执行写成通过。
+当前文档描述阶段 0–6 的实际实现和本轮收尾门禁；本轮已完成 Sol 独立复验，结论为 **PASS WITH NON-BLOCKING RISKS**。既有 CI 记录只作为历史证据保留。本机 Playwright 的真实启动失败按环境限制登记，不把测试收集或清单结果写成浏览器通过。
 
 ## 本地门禁
 
@@ -12,11 +9,14 @@ uv sync --project backend --locked
 uv lock --project backend --check
 uv run --directory backend ruff check app tests
 uv run --directory backend pytest
+uv run --directory backend pytest
 
 npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
 npm --prefix frontend run typecheck
 npm --prefix frontend run test
 npm --prefix frontend run build
+npm --prefix frontend run e2e:typecheck
+npm --prefix frontend run e2e -- --list
 ~~~
 
 SQLite migration 必须对临时或明确的开发数据库运行，不触碰真实数据：
@@ -98,7 +98,8 @@ sufficient/refuse 路由、拒答零 Provider、canonical request UUID、重复 
 阶段 6 批次 D 使用锁定的 `mcp==2.1.1`、临时 SQLite、受控 fake 和 SDK 内存 transport，覆盖五个
 工具的精确注册与 strict `extra=forbid` schema、共享 application service 调用、Collection 查询、
 非法额外字段/UUID/Windows 路径、loopback SSRF fail-closed、稳定错误脱敏和响应边界；0005/0006
-migration 在临时 SQLite 上执行 upgrade/downgrade/upgrade。MCP Server 的 stdio 入口不输出协议外
+migration 在临时 SQLite 上执行 upgrade/downgrade/upgrade。当前 0007 migration 还增加 Tag、
+KnowledgeItemTag 和候选合集建议字段，并由 Stage2/Frontmatter 测试覆盖往返和收敛。MCP Server 的 stdio 入口不输出协议外
 日志；测试不连接真实外部 MCP Server，也不访问真实 Vault、网页、视频、模型或密钥。
 
 阶段 6 批次 E 使用实际 `mcp==2.1.1` ClientSession、stdio 生命周期实现和进程内 memory transport，
@@ -158,13 +159,14 @@ MCP Provider 的实际入口为 `uv run --directory backend python -m app.mcp.se
 transport，覆盖采集 → JobRunner/Graph 处理 → 人工审核 → 发布到 Obsidian → SQLite/Qdrant
 检索 → 带 Citation 的 SSE 回答 → MCP `search_knowledge`/`get_item` 查询闭环。前端 Playwright
 使用固定 `@playwright/test==1.53.0`、`workers=1`、127.0.0.1 Vite webServer 和浏览器内合成
-API fixture，覆盖收件箱审核、发布、合集列表/详情/移除成员、设置页五类 Provider、FFmpeg
-未配置说明、一次合成备份、搜索、证据回答和 Citation UI；所有未处理的 `/api/**` 请求都会使
+API fixture，覆盖文本/Markdown、MD/TXT/PDF/DOCX 文件队列、静态网页、视频、收件箱审核编辑与
+approve/reject/cancel/publish、知识库筛选/编辑冲突/reprocess/软删除、Dashboard/Jobs 恢复、合集、
+设置页五类 Provider、FFmpeg 未配置说明、一次合成备份、搜索、证据拒答、证据回答和 Citation UI；所有未处理的 `/api/**` 请求都会使
 测试失败。失败时保留 trace、screenshot 和 video。CI 还执行独立 E2E typecheck、Chromium 安装
-和 Playwright，并上传 `playwright-report` 与 `test-results`。提交 `ba7e247aac0213c85e223bff3238143af16a99f8`
+和 Playwright，并上传 `playwright-report` 与 `test-results`。当前清单应发现 6 个测试；历史提交 `ba7e247aac0213c85e223bff3238143af16a99f8`
 的四个 H3 基线 jobs 均通过；H4 提交 `5995efb0f39732b175994cdb7d450e8c2eccf144` 的 run
 `33281127978` 已在 CI Chromium 执行 3 个合成 E2E 并通过。本机未安装 Playwright 1.53 对应
-Chromium，因此本机真实 E2E 仍作为环境限制。阶段 6 结论仍为 **PASS WITH NON-BLOCKING RISKS**。
+Chromium，因此本轮本机真实 E2E 执行 6 条均在浏览器启动前失败，仍作为环境限制。既有阶段 6 结论只保留为历史记录。
 测试不访问真实 Vault、网页、视频、模型、密钥或外部 MCP。
 
 阶段 6 批次 G 定向命令：
@@ -174,12 +176,13 @@ uv run --directory backend ruff check tests/test_stage6_end_to_end.py
 uv run --directory backend pytest -q tests/test_stage6_end_to_end.py
 npm --prefix frontend run e2e:typecheck
 npm --prefix frontend run e2e -- --list
+npm --prefix frontend run e2e
 ~~~
 
-H4 本轮合成浏览器收口的本机结果：`e2e:typecheck` 和 `e2e -- --list` 只验证测试加载，真实
-Chromium 执行仍受本机浏览器环境限制；不下载或安装浏览器。H4 提交 `5995efb0f39732b175994cdb7d450e8c2eccf144`
-的 run `33281127978` 已在 CI Chromium 执行 3 个合成 E2E 并通过；`ba7e247aac0213c85e223bff3238143af16a99f8`
-仅为 H3 基线。Sol 已记录的全量结果为后端 209 passed、前端 5 files / 27 tests。
+本轮合成浏览器收口的本机结果：`e2e:typecheck` 通过，`e2e -- --list` 发现 6 个测试；
+`npm --prefix frontend run e2e` 的 6 个测试均因缺少
+`C:\Users\Lenovo\AppData\Local\ms-playwright\chromium_headless_shell-1178\chrome-win\headless_shell.exe`
+在浏览器启动前失败。不下载或安装浏览器。历史 H4 run 只执行过当时的 3 个场景，不能替代本轮 6 个场景。
 
 ## 阶段 6 H1–H3 维护功能
 
@@ -239,13 +242,17 @@ npm --prefix frontend run test
 ## 环境能力门禁
 
 - Docker build：GitHub Actions 或具备 Docker 的环境；不要求本机安装 Docker。
-- 真实浏览器自动化：H3 基线与 H4 提交的 Playwright Chromium 合成闭环均已在 GitHub Actions 通过；H4 run `33281127978` 实际执行 3 个合成 E2E。人工浏览器闭环 passed；本机缺少 Playwright 1.53 对应 Chromium，不把本机运行写成通过。
-- FFmpeg/yt-dlp：本机未调用真实二进制且不自行安装；阶段 5 使用注入 runner、默认本机
-  loopback 安全代理和离线 connector 验证固定 adapter/网络边界，缺失二进制必须返回
-  capability/degraded，不得伪装真实工具互操作已经通过。
+- 真实浏览器自动化：当前工作树有 6 个 Playwright 合成场景；本机因缺少 Playwright 1.53 对应 Chromium 无法启动，不能标记为通过。历史 H4 CI run `33281127978` 实际执行过当时的 3 个场景；本轮新改动须由 CI 或具备浏览器能力的环境重新执行。
+- FFmpeg/yt-dlp：FFmpeg 命令在本机可用；自动化仍使用注入 runner 验证固定参数和路径边界。
+  真实 yt-dlp/extractor/网站仍未调用；缺失二进制必须返回 capability/degraded，不得伪装互操作通过。
 - 阶段 3 URL 获取：只测试公网 DNS 解析和 mock transport；不使用真实个人网页凭据。
-- 阶段 4 reranker：没有明确的上游 HTTP 协议，因此只测试可注入 Protocol 和本地
-  keyword-overlap 参考实现，不将其作为生产兼容适配器。
+- 可选生产 Provider 维护：`tests/test_production_capabilities.py` 使用 injected model loader、
+  `MockTransport`、合成图片/音频和临时 Artifact，覆盖 faster-whisper CUDA 初始化失败退回 CPU、
+  Vision 仅发送 Base64 且拒绝未知图片格式、FFmpeg sampler 路径越界、BGE 分数映射与
+  `create_app` 懒加载装配。自动化不得下载或加载真实模型。
+- 2026-08-30 本机人工维护验证另行使用公开缓存与合成输入：`faster-whisper medium` 在 RTX 3060
+  CUDA `int8_float16` 运行通过，CPU `BAAI/bge-reranker-v2-m3` 重排通过，DeepSeek Vision 合成
+  PNG 请求通过。该证据不代表真实用户视频、画面质量、费用或长期供应商可用性验证。
 
 ## 数据安全
 

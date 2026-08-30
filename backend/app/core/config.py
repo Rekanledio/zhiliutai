@@ -65,15 +65,32 @@ class Settings(BaseSettings):
     embedding_api_key: str | None = Field(default=None, repr=False)
     embedding_dimensions: int = 1536
     embedding_cache_path: Path = PROJECT_ROOT / "data" / "models" / "fastembed"
+    asr_provider: Literal["openai-compatible", "faster-whisper"] = "openai-compatible"
     asr_base_url: str | None = None
     asr_model: str | None = None
     asr_api_key: str | None = Field(default=None, repr=False)
+    asr_device: Literal["auto", "cuda", "cpu"] = "auto"
+    asr_compute_type: str = "int8_float16"
+    asr_cpu_compute_type: str = "int8"
+    asr_local_files_only: bool = True
+    asr_cache_path: Path = PROJECT_ROOT / "data" / "models" / "faster-whisper"
+    vision_provider: Literal["openai-compatible"] = "openai-compatible"
     vision_base_url: str | None = None
     vision_model: str | None = None
     vision_api_key: str | None = Field(default=None, repr=False)
+    vision_request_timeout_seconds: float = 60.0
+    vision_max_image_bytes: int = 10_000_000
+    video_vision_keyframe_interval_seconds: int = 30
+    video_vision_max_keyframes: int = 24
+    reranker_provider: Literal["openai-compatible", "sentence-transformers"] = (
+        "openai-compatible"
+    )
     reranker_base_url: str | None = None
     reranker_model: str | None = None
     reranker_api_key: str | None = Field(default=None, repr=False)
+    reranker_device: Literal["cpu", "cuda"] = "cpu"
+    reranker_local_files_only: bool = True
+    reranker_cache_path: Path = PROJECT_ROOT / "data" / "models" / "reranker"
 
     rag_query_max_chars: int = 2_000
     rag_rrf_k: int = 60
@@ -97,6 +114,8 @@ class Settings(BaseSettings):
         "artifact_root",
         "qdrant_path",
         "embedding_cache_path",
+        "asr_cache_path",
+        "reranker_cache_path",
         "workflow_checkpoint_path",
         "backup_root",
         mode="before",

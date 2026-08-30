@@ -23,6 +23,31 @@ def submit_and_wait(
     return payload["item_id"], payload["job_id"]
 
 
+def _remove_frontmatter_key(note_path, key: str) -> None:
+    lines = note_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    target = f"{key}:"
+    rewritten: list[str] = []
+    index = 0
+    found = False
+    while index < len(lines):
+        line = lines[index]
+        if not line.startswith((" ", "\t")) and line.rstrip("\r\n") == target:
+            found = True
+            index += 1
+            while index < len(lines):
+                following = lines[index]
+                if following.strip() == "" or following.startswith((" ", "\t")):
+                    index += 1
+                    continue
+                break
+            continue
+        rewritten.append(line)
+        index += 1
+    if not found:
+        raise AssertionError(f"Frontmatter key not found: {key}")
+    note_path.write_text("".join(rewritten), encoding="utf-8")
+
+
 def test_text_markdown_ingestion_dedup_and_draft(client: TestClient) -> None:
     item_id, _ = submit_and_wait(client)
     item = client.get(f"/api/items/{item_id}").json()
@@ -113,10 +138,25 @@ def test_watcher_detects_file_modification(client: TestClient, settings) -> None
     published = client.post(f"/api/items/{item_id}/publish").json()
     original_version = published["version_no"]
     note_path = settings.managed_vault_root / published["note_relative_path"]
+    collection = client.post(
+        "/api/collections", json={"name": "监听保留合集", "description": None}
+    )
+    assert collection.status_code == 201, collection.text
+    collection_id = collection.json()["id"]
+    added = client.post(f"/api/collections/{collection_id}/items/{item_id}")
+    assert added.status_code == 200, added.text
+    _remove_frontmatter_key(note_path, "collections")
     original = note_path.read_text(encoding="utf-8")
-    note_path.write_text(original.replace("监听前正文", "监听中正文"), encoding="utf-8")
+    with_listener_tag = original.replace(
+        '  - "测试"\n  - "阶段2"', '  - "监听标签"'
+    )
+    note_path.write_text(
+        with_listener_tag.replace("监听前正文", "监听中正文"), encoding="utf-8"
+    )
     time.sleep(0.06)
-    note_path.write_text(original.replace("监听前正文", "监听后正文"), encoding="utf-8")
+    note_path.write_text(
+        with_listener_tag.replace("监听前正文", "监听后正文"), encoding="utf-8"
+    )
     deadline = time.monotonic() + 4
     while time.monotonic() < deadline:
         latest = client.get(f"/api/items/{item_id}").json()
@@ -128,6 +168,8 @@ def test_watcher_detects_file_modification(client: TestClient, settings) -> None
     time.sleep(0.4)
     stable = client.get(f"/api/items/{item_id}").json()
     assert stable["version_no"] == original_version + 1
+    assert stable["confirmed_tags"] == ["监听标签"]
+    assert stable["collections"] == ["监听保留合集"]
 
     with sqlite3.connect(settings.database_path) as connection:
         current_version_id = connection.execute(

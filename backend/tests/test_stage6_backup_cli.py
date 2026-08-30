@@ -65,7 +65,7 @@ def test_offline_cli_backup_and_restore_use_explicit_targets(tmp_path: Path, mon
     with sqlite3.connect(target / "business.sqlite") as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("0006_collections",)
+        ).fetchone() == ("0007_tags_and_review_suggestions",)
 
 
 def test_offline_cli_errors_are_stable_and_do_not_echo_paths(tmp_path: Path, capsys) -> None:

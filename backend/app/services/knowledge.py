@@ -15,7 +15,14 @@ from sqlalchemy.exc import IntegrityError
 from app.core.errors import ApplicationError
 from app.core.paths import safe_relative_path
 from app.core.safety import redact_sensitive_text
-from app.db.models import Collection, CollectionItem, ContentVersion, KnowledgeItem
+from app.db.models import (
+    Collection,
+    CollectionItem,
+    ContentVersion,
+    KnowledgeItem,
+    KnowledgeItemTag,
+    Tag,
+)
 from app.obsidian.markdown import ObsidianVault, StagedWrite
 from app.rag.citations import CitationBuilder
 from app.rag.retrieval import HybridRetriever
@@ -25,6 +32,7 @@ from app.schemas.collections import (
     normalize_collection_names,
     normalize_collection_text,
 )
+from app.schemas.tags import normalize_tag_names
 from app.schemas.rag import (
     CitationResponse,
     EvidenceResponse,
@@ -121,6 +129,7 @@ class KnowledgeApplicationService:
 
     async def get_item(self, item_id: str) -> dict[str, object]:
         item, version, binding = await self.stage2.get_item(item_id)
+        confirmed_tags, collections = await self.stage2.get_item_organization(item.id)
         relative_path = safe_relative_path(binding.relative_path) if binding else None
         if binding is not None and relative_path is None:
             raise ValueError("item path is invalid")
@@ -136,6 +145,17 @@ class KnowledgeApplicationService:
             "current_content_version_id": item.current_content_version_id,
             "pending_content_version_id": item.pending_content_version_id,
             "body": redact_sensitive_text(body) if body is not None else None,
+            "summary": (
+                redact_sensitive_text(version.summary)
+                if version is not None and version.summary is not None
+                else None
+            ),
+            "suggested_tags": self._safe_tags(version) if version is not None else [],
+            "suggested_collections": (
+                self._safe_collections(version) if version is not None else []
+            ),
+            "confirmed_tags": confirmed_tags,
+            "collections": collections,
             "note_relative_path": relative_path,
             "version_no": version.version_no if version is not None else None,
         }
@@ -186,9 +206,25 @@ class KnowledgeApplicationService:
                 break
         return result
 
+    @staticmethod
+    def _safe_collections(version: ContentVersion) -> list[str]:
+        try:
+            parsed = json.loads(version.suggested_collections_json or "[]")
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(parsed, list):
+            return []
+        try:
+            return normalize_collection_names(parsed)
+        except ValueError:
+            return []
+
     @classmethod
     def _item_projection(
-        cls, item: KnowledgeItem, version: ContentVersion
+        cls,
+        item: KnowledgeItem,
+        version: ContentVersion,
+        confirmed_tags: Sequence[str] = (),
     ) -> dict[str, object]:
         return {
             "id": item.id,
@@ -196,6 +232,7 @@ class KnowledgeApplicationService:
             "source_type": redact_sensitive_text(item.source_type),
             "version_no": version.version_no,
             "suggested_tags": cls._safe_tags(version),
+            "confirmed_tags": list(confirmed_tags),
         }
 
     @staticmethod
@@ -316,6 +353,27 @@ class KnowledgeApplicationService:
                 "合集关系包含不允许的内容",
             ) from error
 
+    @staticmethod
+    async def _tag_relation_names(
+        session: AsyncSession, item_id: str
+    ) -> list[str]:
+        result = await session.execute(
+            select(Tag.name)
+            .join(KnowledgeItemTag, KnowledgeItemTag.tag_id == Tag.id)
+            .where(KnowledgeItemTag.knowledge_item_id == item_id)
+            .order_by(Tag.normalized_name, Tag.name)
+        )
+        try:
+            return normalize_tag_names(
+                [name for name in result.scalars() if isinstance(name, str)]
+            )
+        except ValueError as error:
+            raise ApplicationError(
+                409,
+                "tag_invalid_state",
+                "标签关系包含不允许的内容",
+            ) from error
+
     async def _stage_members(
         self,
         session: AsyncSession,
@@ -422,11 +480,18 @@ class KnowledgeApplicationService:
             if collection is None:
                 raise ApplicationError(404, "collection_not_found", "合集不存在")
             members = await self._valid_members(session, collection.id)
-        items = [self._item_projection(item, version) for item, version in members]
+            member_tags = {
+                item.id: await self._tag_relation_names(session, item.id)
+                for item, _version in members
+            }
+        items = [
+            self._item_projection(item, version, member_tags.get(item.id, []))
+            for item, version in members
+        ]
         related_tags: list[str] = []
         seen_tags: set[str] = set()
         for item in items:
-            for tag in item["suggested_tags"]:
+            for tag in item["confirmed_tags"]:
                 if not isinstance(tag, str) or tag.casefold() in seen_tags:
                     continue
                 seen_tags.add(tag.casefold())
