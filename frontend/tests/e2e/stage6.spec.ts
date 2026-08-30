@@ -361,7 +361,7 @@ test("synthetic review publish search answer and citation flow", async ({ page }
   await page.getByRole("button", { name: "Markdown" }).click();
   await page.getByLabel("知识内容").fill(itemBody);
   await page.getByRole("button", { name: "提交到收件箱" }).click();
-  await expect(page.getByText("任务状态：succeeded")).toBeVisible();
+  await expect(page.getByText("任务状态：已完成", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "审核通过" })).toBeVisible();
 
   await page.getByRole("button", { name: "审核通过" }).click();
@@ -713,13 +713,13 @@ test("synthetic capture modes, review editor, and review decisions", async ({ pa
 
   await page.goto("/");
   await page.getByRole("button", { name: "上传文件" }).click();
-  await expect(page.getByRole("button", { name: "文件" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "文件", exact: true })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "今日总览" }).click();
   await page.getByRole("button", { name: "添加网页" }).click();
-  await expect(page.getByRole("button", { name: "网页" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "网页", exact: true })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "今日总览" }).click();
   await page.getByRole("button", { name: "添加视频" }).click();
-  await expect(page.getByRole("button", { name: "视频" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "视频", exact: true })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "今日总览" }).click();
   await page.getByRole("button", { name: "上传文件" }).click();
 
@@ -906,10 +906,10 @@ test("synthetic knowledge library protects edits, reprocesses, and soft deletes"
     await dialog.accept();
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "知识库" }).click();
+  await page.getByRole("button", { name: "知识库", exact: true }).click();
   await expect(page.getByRole("heading", { name: "知识库", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "合成知识详情", exact: true })).toBeVisible();
-  await expect(page.getByText("受管理目录已隐藏", { exact: true })).toBeVisible();
+  await expect(page.locator("main")).toContainText("受管理目录已隐藏");
   await expect(page.locator("body")).not.toContainText("C:\\Users\\Synthetic\\Vault");
   await expect(page.getByText("当前 Markdown 正文", { exact: true })).toBeVisible();
 
@@ -1135,12 +1135,17 @@ test("synthetic dashboard jobs recovery and evidence refusal", async ({ page }) 
   await page.getByRole("button", { name: "今日总览" }).click();
   await page.getByRole("button", { name: "查看任务" }).click();
   await expect(page.getByRole("heading", { name: "处理任务", exact: true })).toBeVisible();
-  await expect(page.getByText("上游服务暂时不可用", { exact: true })).toBeVisible();
-  await expect(page.getByText("最后 heartbeat", { exact: true })).toBeVisible();
+  const upstreamError = page.getByText("上游服务暂时不可用", { exact: true });
+  await expect(upstreamError).toHaveCount(2);
+  await expect(upstreamError.first()).toBeVisible();
+  const heartbeatLabels = page.getByText("最后 heartbeat", { exact: true });
+  await expect(heartbeatLabels).toHaveCount(2);
+  await expect(heartbeatLabels.first()).toBeVisible();
   await expect(page.getByText("JobAttempt 历史（1）", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "重试", exact: true }).click();
   await expect(page.getByRole("status")).toContainText("任务已重新排队");
-  await page.getByRole("button", { name: "取消", exact: true }).click();
+  const videoJob = page.getByRole("article").filter({ hasText: "ingest_video" });
+  await videoJob.getByRole("button", { name: "取消", exact: true }).click();
   await expect(page.getByRole("status")).toContainText("任务已取消");
 
   await page.getByRole("button", { name: "搜索与问答" }).click();
