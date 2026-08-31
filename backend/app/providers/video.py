@@ -373,7 +373,11 @@ class YtDlpDownloader:
         if not execution.network_policy_enforced:
             raise VideoSecurityError("视频安全网络执行器未提供连接策略证明")
         result = execution.command
-        if result.returncode != 0:
+        # yt-dlp raises MaxDownloadsReached after completing the first item
+        # when --max-downloads 1 is active. The CLI maps that successful,
+        # bounded stop to 101, so validate its outputs below instead of
+        # treating it as an upstream acquisition failure.
+        if result.returncode not in {0, 101}:
             raise VideoProviderError("视频来源获取失败")
         payload = self._metadata(result.stdout)
         duration_ms = self._duration_ms(payload.get("duration"), options.max_duration_ms)
@@ -434,6 +438,8 @@ class YtDlpDownloader:
                     tool_version=self.tool_version,
                 )
             )
+        if result.returncode == 101 and media_path is None and not subtitles:
+            raise VideoProviderError("视频来源获取失败")
         return VideoDownloadResult(
             metadata,
             media_path,

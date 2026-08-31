@@ -22,6 +22,7 @@ from app.providers.video import (
     FrameSample,
     VideoDownloadOptions,
     VideoDownloadResult,
+    VideoProviderError,
     YtDlpDownloader,
 )
 from app.video.types import Keyframe, SubtitleTrack, VideoSourceMetadata
@@ -255,6 +256,65 @@ async def test_ytdlp_adapter_uses_closed_args_and_deterministic_runner(tmp_path:
         "--exec-before-download",
     })
     assert runner.args[-1] == "https://video.example/watch"
+
+
+@pytest.mark.asyncio
+async def test_ytdlp_adapter_accepts_bounded_stop_only_with_completed_output(
+    tmp_path: Path,
+) -> None:
+    class Runner:
+        def __init__(self, *, write_media: bool) -> None:
+            self.write_media = write_media
+
+        async def run(self, args, *, cwd: Path, timeout: float, env=None) -> CommandResult:
+            del args, timeout, env
+            if self.write_media:
+                Path(cwd, "fixture-video.mp4").write_bytes(b"video")
+            return CommandResult(
+                101,
+                json.dumps(
+                    {
+                        "id": "fixture-id",
+                        "title": "离线视频",
+                        "duration": 1.0,
+                        "ext": "mp4",
+                        "webpage_url": "https://video.example/watch",
+                    }
+                ).encode(),
+            )
+
+    options = VideoDownloadOptions(
+        max_bytes=100,
+        max_duration_ms=10_000,
+        timeout_seconds=2,
+        max_redirects=2,
+    )
+    successful = YtDlpDownloader(
+        tmp_path,
+        runner=Runner(write_media=True),
+        url_validator=lambda _url: None,
+        network_executor=DeterministicYtDlpNetworkExecutor(),
+    )
+    result = await successful.download(
+        "https://video.example/watch",
+        destination=tmp_path / "successful",
+        options=options,
+    )
+    assert result.media_path is not None
+    assert result.media_path.read_bytes() == b"video"
+
+    missing_output = YtDlpDownloader(
+        tmp_path,
+        runner=Runner(write_media=False),
+        url_validator=lambda _url: None,
+        network_executor=DeterministicYtDlpNetworkExecutor(),
+    )
+    with pytest.raises(VideoProviderError, match="来源获取失败"):
+        await missing_output.download(
+            "https://video.example/watch",
+            destination=tmp_path / "missing-output",
+            options=options,
+        )
 
 
 @pytest.mark.asyncio
